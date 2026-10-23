@@ -240,6 +240,21 @@ for port in ports.isEmpty ? [23306, 13306] : ports {
         group.wait()
         expect(answers, Array(1...8), "statements from several threads")
 
+        // The editor's type and length fields, split and joined again.
+        for (type, base, length) in [("int(10) unsigned", "int unsigned", "10"), ("varchar(40)", "varchar", "40"), ("decimal(10,2)", "decimal", "10,2"),
+                                     ("enum('a(1)','b')", "enum", "'a(1)','b'"), ("text", "text", ""), ("INT UNSIGNED", "INT UNSIGNED", ""),
+                                     ("datetime(3)", "datetime", "3"), ("bigint(20) unsigned zerofill", "bigint unsigned zerofill", "20")] {
+            let parts = TableDesign.split(type)
+            expect(parts.base, base, "base of \(type)")
+            expect(parts.length, length, "length of \(type)")
+            expect(TableDesign.join(parts.base, parts.length), type, "\(type) joined again")
+        }
+        expect(TableDesign.length(changingType: "VARCHAR", to: "CHAR", from: "40"), "40", "a size carries over")
+        expect(TableDesign.length(changingType: "VARCHAR", to: "TEXT", from: "40"), "", "TEXT takes none")
+        expect(TableDesign.length(changingType: "VARCHAR", to: "DECIMAL", from: "40"), "10,2", "DECIMAL's digits")
+        expect(TableDesign.length(changingType: "INT", to: "VARCHAR", from: ""), "255", "the usual size")
+        expect(TableDesign.length(changingType: "ENUM", to: "VARCHAR", from: "'a'"), "255", "values aren't a size")
+
         // CSV import statements.
         var plan = CSVImport(table: "child", columns: try db.columns(of: "child"), sources: [0, 1, nil], rows: (10..<1210).map { ["\($0)", "2"] })
         plan.replace = true
