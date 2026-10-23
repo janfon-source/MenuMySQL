@@ -1,28 +1,13 @@
 import AppKit
 
-/// The menu bar icon: a dolphin leaping out of an outlined rounded square, after MySQL's mark and
-/// like 隨手SQLite's quill, as a template image so it takes the menu bar's color.
+/// The menu bar icon: a leaping dolphin, after MySQL's mark, as one solid shape, in the same
+/// plain style as 隨手SQLite's feather and 隨手記's pen; a template image, so it takes the menu
+/// bar's color.
 enum StatusIcon {
     static let image: NSImage = {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-            NSColor.black.set()
-            let square = NSBezierPath(roundedRect: NSRect(x: 2.15, y: 2.15, width: 10.7, height: 10.7), xRadius: 2, yRadius: 2)
-            square.lineWidth = 1.3
-            square.stroke()
-            // A gap round the dolphin where it crosses the square.
-            // Tipped forward a little, as if leaping out over the square's top right corner.
-            var placed = AffineTransform(translationByX: -9, byY: -9)
-            placed.append(AffineTransform(rotationByDegrees: -15))
-            placed.append(AffineTransform(translationByX: 9, byY: 9))
-            placed.append(AffineTransform(scale: 0.86))
-            placed.append(AffineTransform(translationByX: 4.0, byY: 3.8))
-            let dolphin = dolphin()
-            dolphin.transform(using: placed)
-            NSGraphicsContext.current?.compositingOperation = .clear
-            dolphin.lineWidth = 2.2
-            dolphin.stroke()
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
-            dolphin.fill()
+            NSColor.black.setFill()
+            dolphin().fill()
             return true
         }
         image.isTemplate = true
