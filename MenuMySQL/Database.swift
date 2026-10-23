@@ -41,6 +41,36 @@ enum Value: Equatable {
     }
 }
 
+/// A table's entry in information_schema.TABLES. Sizes are in bytes; the row count is an
+/// estimate for InnoDB.
+struct TableFacts {
+    var engine: String?
+    var rowFormat: String?
+    var estimatedRows: Int?
+    var averageRowLength: Int?
+    var dataLength: Int?
+    var indexLength: Int?
+    var dataFree: Int?
+    var autoIncrement: Int?
+    var created: String?
+    var updated: String?
+    var collation: String?
+    var comment: String
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false   // "0 bytes", not "Zero KB"
+        return formatter
+    }()
+
+    static func bytes(_ count: Int?) -> String {
+        count.map { byteFormatter.string(fromByteCount: Int64($0)) } ?? "—"
+    }
+
+    var totalLength: Int? { dataLength.map { $0 + (indexLength ?? 0) } }
+}
+
 /// What a statement returned: its columns and rows, and how many rows it changed.
 struct ResultSet {
     var columns: [String] = []
@@ -201,6 +231,13 @@ final class MySQLDatabase {
     private var wire: MySQLWire?
     private var tunnel: SSHTunnel?
     private var lastUsed = Date()
+    /// Statements run off the main thread while the window shows they're working; the lock keeps
+    /// two from using the one connection at once.
+    private let lock = NSRecursiveLock()
+    /// Where the connection went (the tunnel's end, through SSH), for cancel() to go too.
+    private var endpoint = (host: "", port: 0)
+    /// Told how many rows have come in so far while a large result arrives, on the thread running it.
+    var onRows: ((Int) -> Void)?
     private(set) var serverVersion = ""
     private(set) var usesTLS = false
     /// Whether this server's strings take backslash escapes; `Database.backslashEscapes` follows
@@ -235,10 +272,28 @@ final class MySQLDatabase {
     }
 
     func close() {
+        lock.lock()
+        defer { lock.unlock() }
         wire?.quit()
         wire = nil
         tunnel?.close()
         tunnel = nil
+    }
+
+    /// Stops the statement running now, from another connection, as the mysql client's Ctrl-C
+    /// does; the statement then fails with "Query execution was interrupted". Call it off the
+    /// main thread: it connects.
+    func cancel() {
+        guard let id = wire?.connectionID, id != 0, !endpoint.host.isEmpty else { return }
+        guard let other = try? MySQLWire(host: endpoint.host, port: endpoint.port, user: server.user, password: password,
+                                         database: nil, tls: server.usesSSH && server.tls == .preferred ? .disabled : server.tls) else { return }
+        _ = try? other.query("KILL QUERY \(id)")
+        other.quit()
+    }
+
+    /// Whether the error is the one a cancelled statement ends with.
+    static func wasCancelled(_ error: Error) -> Bool {
+        error.localizedDescription.contains("(1317)")
     }
 
     private func connect() throws {
@@ -260,6 +315,7 @@ final class MySQLDatabase {
         } catch {
             throw Self.translate(error, server: server)
         }
+        endpoint = (host, port)
         self.wire = wire
         serverVersion = wire.serverVersion
         usesTLS = wire.usesTLS
@@ -268,6 +324,9 @@ final class MySQLDatabase {
         let mode = try execute("SELECT @@SESSION.sql_mode").last?.rows.first?.first?.display ?? ""
         backslashEscapes = !mode.contains("NO_BACKSLASH_ESCAPES")
         Database.backslashEscapes = backslashEscapes
+        // MySQL 8 otherwise keeps information_schema's sizes for a day, and shows a table's old
+        // size after OPTIMIZE; MariaDB has no such setting.
+        if !isMariaDB { _ = try? execute("SET SESSION information_schema_stats_expiry = 0") }
     }
 
     /// The connection, made again if it broke or the server may have dropped it while idle.
@@ -281,8 +340,14 @@ final class MySQLDatabase {
     }
 
     private func execute(_ sql: String) throws -> [MySQLWire.Result] {
+        lock.lock()
+        defer { lock.unlock() }
         let wire = try ready()
-        defer { lastUsed = Date() }
+        wire.onRows = onRows
+        defer {
+            wire.onRows = nil
+            lastUsed = Date()
+        }
         do {
             return try wire.query(sql)
         } catch {
@@ -327,6 +392,8 @@ final class MySQLDatabase {
 
     /// Makes `name` the database in use; nil for none (which only a new connection gives).
     func use(_ name: String?) throws {
+        lock.lock()
+        defer { lock.unlock() }
         guard let name else {
             server.database = nil
             return try connect()
@@ -476,6 +543,42 @@ final class MySQLDatabase {
         let sql = "SELECT COUNT(*) FROM \(Database.quote(name))" + (filter.map { " WHERE \($0.sql)" } ?? "")
         guard case .integer(let n)? = try run(sql, filter?.bindings ?? []).rows.first?.first else { return 0 }
         return Int(n)
+    }
+
+    /// What information_schema says of one table: its engine, sizes, estimated rows, next
+    /// AUTO_INCREMENT value and so on (fresh on MySQL 8 too: connect() tells it not to keep
+    /// them); nil for a view.
+    func facts(of table: String) throws -> TableFacts? {
+        guard let row = try run("""
+            SELECT ENGINE, ROW_FORMAT, TABLE_ROWS, AVG_ROW_LENGTH, DATA_LENGTH, INDEX_LENGTH, DATA_FREE, AUTO_INCREMENT,
+                   CREATE_TIME, UPDATE_TIME, TABLE_COLLATION, TABLE_COMMENT
+            FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND TABLE_TYPE <> 'VIEW'
+            """, [.text(table)]).rows.first, row.count >= 12 else { return nil }
+        func text(_ i: Int) -> String? { row[i] == .null ? nil : row[i].display }
+        func number(_ i: Int) -> Int? { text(i).flatMap { Double($0) }.map { Int($0) } }
+        return TableFacts(engine: text(0), rowFormat: text(1), estimatedRows: number(2), averageRowLength: number(3),
+                          dataLength: number(4), indexLength: number(5), dataFree: number(6), autoIncrement: number(7),
+                          created: text(8), updated: text(9), collation: text(10), comment: text(11) ?? "")
+    }
+
+    /// The column whose values AUTO_INCREMENT gives, if the table has one.
+    func autoIncrementColumn(of table: String) throws -> String? {
+        try columns(of: table).first { $0.autoIncrement }?.name
+    }
+
+    /// The value AUTO_INCREMENT would give next if it started over: one past the column's largest.
+    func nextFreeAutoIncrement(of table: String) throws -> Int? {
+        guard let column = try autoIncrementColumn(of: table) else { return nil }
+        let largest = try run("SELECT MAX(\(Database.quote(column))) FROM \(Database.quote(table))").rows.first?.first
+        return (largest.flatMap { $0 == .null ? nil : Double($0.display) }.map { Int($0) } ?? 0) + 1
+    }
+
+    /// Sets the AUTO_INCREMENT value the next row gets. The server won't go below one past the
+    /// largest value already there, so it returns the value it ends up at.
+    @discardableResult
+    func setAutoIncrement(of table: String, to value: Int) throws -> Int? {
+        try run("ALTER TABLE \(Database.quote(table)) AUTO_INCREMENT = \(max(1, value))")
+        return try facts(of: table)?.autoIncrement
     }
 
     // MARK: Rows

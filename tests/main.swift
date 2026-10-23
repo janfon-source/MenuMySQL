@@ -184,6 +184,62 @@ for port in ports.isEmpty ? [23306, 13306] : ports {
         let doc = try SchemaDocument.markdown(for: db)
         check(doc.contains("fk_g") && doc.contains("CASCADE") && doc.contains("t_child"), "document has keys and triggers")
 
+        // A table's facts, its own document, and AUTO_INCREMENT set and reset.
+        try db.run("CREATE TABLE counter (id INT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(20)) COMMENT 'numbered'")
+        try db.run("INSERT INTO counter (note) VALUES ('a'), ('b'), ('c')")
+        try db.run("DELETE FROM counter WHERE id = 3")
+        let facts = try db.facts(of: "counter")
+        expect(facts?.engine, "InnoDB", "engine")
+        expect(facts?.autoIncrement, 4, "next AUTO_INCREMENT")
+        expect(facts?.comment, "numbered", "table comment")
+        check((facts?.dataLength ?? 0) > 0, "data size")
+        check(try db.facts(of: "nothing_here") == nil, "no facts for a missing table")
+        expect(try db.autoIncrementColumn(of: "counter"), "id", "AUTO_INCREMENT column")
+        expect(try db.autoIncrementColumn(of: "child"), nil, "no AUTO_INCREMENT column")
+        expect(try db.nextFreeAutoIncrement(of: "counter"), 3, "one past the largest")
+        expect(try db.setAutoIncrement(of: "counter", to: 3), 3, "reset to one past the largest")
+        expect(try db.setAutoIncrement(of: "counter", to: 500), 500, "set higher")
+        expect(try db.setAutoIncrement(of: "counter", to: 1), 3, "the server won't go below the largest")
+        try db.run("INSERT INTO counter (note) VALUES ('d')")
+        expect(try db.run("SELECT MAX(id) FROM counter").rows.first?.first, .integer(3), "next row takes the reset value")
+        let one = try SchemaDocument.markdown(for: DatabaseObject(name: "counter", kind: .table), in: db)
+        check(one.contains("# 資料表：counter") || one.contains("# Table: counter"), "table document title")
+        check(one.contains("InnoDB") && one.contains("numbered") && one.contains("AUTO_INCREMENT"), "table document has facts and columns")
+        check(!one.contains("### counter"), "table document without the section heading")
+        for verb in ["OPTIMIZE", "ANALYZE"] {
+            check(!(try db.run("\(verb) TABLE `counter`").rows.isEmpty), "\(verb) TABLE says something")
+        }
+
+        // A long statement stopped from another thread fails as cancelled, and the connection
+        // carries on; rows coming in are counted while they arrive.
+        let started = Date()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { db.cancel() }
+        do {
+            _ = try db.run("SELECT SLEEP(20)")
+            // MySQL ends an interrupted SLEEP with its result rather than an error.
+        } catch {
+            check(MySQLDatabase.wasCancelled(error), "cancelled error: \(error.localizedDescription)")
+        }
+        check(Date().timeIntervalSince(started) < 5, "cancel stops the statement")
+        expect(try db.run("SELECT 1").rows.first?.first, .integer(1), "connection works after cancelling")
+        var counted = 0
+        db.onRows = { counted = $0 }
+        _ = try db.run("SELECT a.COLUMN_NAME FROM information_schema.COLUMNS a, information_schema.COLUMNS b LIMIT 5000")
+        db.onRows = nil
+        expect(counted, 4000, "rows counted as they arrive")
+        // Two threads at once take turns on the one connection.
+        let group = DispatchGroup()
+        var answers = [Int](repeating: 0, count: 8)
+        let answersLock = NSLock()
+        for i in 0..<8 {
+            DispatchQueue.global().async(group: group) {
+                let n = (try? db.run("SELECT \(i) + 1").rows.first?.first) ?? .null
+                answersLock.lock(); answers[i] = Int(n.display) ?? -1; answersLock.unlock()
+            }
+        }
+        group.wait()
+        expect(answers, Array(1...8), "statements from several threads")
+
         // CSV import statements.
         var plan = CSVImport(table: "child", columns: try db.columns(of: "child"), sources: [0, 1, nil], rows: (10..<1210).map { ["\($0)", "2"] })
         plan.replace = true

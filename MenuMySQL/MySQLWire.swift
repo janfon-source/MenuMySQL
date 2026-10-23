@@ -38,6 +38,8 @@ final class MySQLWire {
     private(set) var serverVersion = ""
     private(set) var connectionID: UInt32 = 0
     private(set) var usesTLS = false
+    /// Told how many rows of a result have come in so far, now and then while a large one arrives.
+    var onRows: ((Int) -> Void)?
     /// The server's capability flags, from its greeting.
     private var serverCapabilities: UInt32 = 0
 
@@ -183,6 +185,7 @@ final class MySQLWire {
             result.rows.append(result.columns.map { column in
                 fields.peek() == 0xfb ? { fields.skip(1); return .null }() : Self.value(fields.lenencBytes() ?? [], column)
             })
+            if result.rows.count % 2000 == 0 { onRows?(result.rows.count) }
         }
         return (result, status & Self.moreResultsExist != 0)
     }
