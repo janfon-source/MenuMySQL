@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// Database passwords, kept in the login keychain by account (user@host:port).
+/// Passwords earlier versions kept in the login keychain, by account (user@host:port). Only read
+/// now, once per account, to move them to the app's own store (Passwords).
 enum Keychain {
     private static let service = "com.jeff.menumysql"
 
@@ -11,21 +12,5 @@ enum Keychain {
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
-    }
-
-    static func save(_ password: String, for account: String) {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
-        let data = Data(password.utf8)
-        if SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary) == errSecItemNotFound {
-            var item = query
-            item[kSecValueData] = data
-            item[kSecAttrLabel] = "隨手MySQL — \(account)"
-            SecItemAdd(item as CFDictionary, nil)
-        }
-    }
-
-    static func delete(for account: String) {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
-        SecItemDelete(query as CFDictionary)
     }
 }

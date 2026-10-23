@@ -28,6 +28,62 @@ struct ColumnDraft: Equatable {
     }
 }
 
+/// An index as the table editor shows it: its name, kind and columns. Each column is written as
+/// in SQL, maybe with a prefix length or an order: `name`, `title(20)`, `created DESC`.
+/// `original` is the index's name in the table before editing; nil for one being added.
+struct IndexDraft: Equatable {
+    enum Kind: String, CaseIterable {
+        case index = "INDEX", unique = "UNIQUE", fulltext = "FULLTEXT", spatial = "SPATIAL"
+    }
+    var name = ""
+    var kind = Kind.index
+    var columns: [String] = []
+    var original: String?
+
+    /// The column a part names: what comes before a prefix length or an order.
+    static func column(of part: String) -> String {
+        let text = part.trimmingCharacters(in: .whitespaces)
+        let name = text.prefix { $0 != "(" && $0 != " " }
+        return name.count >= 2 && name.hasPrefix("`") && name.hasSuffix("`") ? String(name.dropFirst().dropLast()) : String(name)
+    }
+
+    /// The part with its column called something else, the rest kept.
+    static func renaming(_ part: String, to name: String) -> String {
+        let text = part.trimmingCharacters(in: .whitespaces)
+        let head = text.prefix { $0 != "(" && $0 != " " }
+        return name + text.dropFirst(head.count)
+    }
+
+    /// The columns as text, for the editor's field: name, title(20)
+    var columnsText: String { columns.joined(separator: ", ") }
+
+    /// The columns from the editor's field, split at commas outside parentheses.
+    static func columns(from text: String) -> [String] {
+        var parts: [String] = [], current = "", depth = 0
+        for character in text {
+            if character == "(" { depth += 1 } else if character == ")" { depth -= 1 }
+            if character == ",", depth == 0 {
+                parts.append(current); current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        parts.append(current)
+        return parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// The index as SQL, for CREATE TABLE or after ADD: UNIQUE INDEX `name` (`a`, `b`(20) DESC)
+    var definition: String {
+        let parts = columns.map { part -> String in
+            let text = part.trimmingCharacters(in: .whitespaces)
+            let head = text.prefix { $0 != "(" && $0 != " " }
+            return Database.quote(Self.column(of: text)) + text.dropFirst(head.count)
+        }
+        return (kind == .index ? "INDEX" : "\(kind.rawValue) INDEX") + (name.isEmpty ? "" : " " + Database.quote(name))
+            + " (" + parts.joined(separator: ", ") + ")"
+    }
+}
+
 /// A table as it was when editing began: what changing it needs to know, read once so that
 /// remaking the SQL as the user types doesn't ask the server each time.
 struct TableSnapshot {
@@ -35,6 +91,8 @@ struct TableSnapshot {
     let columns: [ColumnDraft]
     /// The single-column unique indexes (not the primary key), by column, with the index's name.
     let uniqueIndexes: [String: String]
+    /// The other indexes, which the editor lists: neither the primary key nor those unique ones.
+    var indexes: [IndexDraft] = []
 }
 
 /// Makes the SQL that creates a table, or changes one to match its edited columns. MySQL changes
@@ -57,11 +115,59 @@ enum TableDesign {
                         autoincrement: column.autoIncrement, comment: column.comment, onUpdate: column.onUpdate,
                         generated: column.generated, collation: column.collation, original: column.name)
         }
-        return TableSnapshot(name: table, columns: columns, uniqueIndexes: unique)
+        return TableSnapshot(name: table, columns: columns, uniqueIndexes: unique,
+                             indexes: try indexDrafts(of: table, in: database, leavingOut: Set(unique.values)))
+    }
+
+    /// The table's indexes as drafts, with their kind, prefix lengths and orders. Indexes on an
+    /// expression (MySQL 8) have no column to show, so they're left out, and so left as they are.
+    private static func indexDrafts(of table: String, in database: MySQLDatabase, leavingOut skip: Set<String>) throws -> [IndexDraft] {
+        let rows = try database.run("""
+            SELECT INDEX_NAME, NON_UNIQUE, INDEX_TYPE, COLUMN_NAME, SUB_PART, COLLATION FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME <> 'PRIMARY'
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """, [.text(table)]).rows
+        var drafts: [IndexDraft] = [], expressions: Set<String> = []
+        for row in rows {
+            let name = row[0].display
+            guard !skip.contains(name) else { continue }
+            guard row[3] != .null else { expressions.insert(name); continue }
+            var part = row[3].display
+            if row[4] != .null { part += "(\(row[4].display))" }
+            if row[5].display == "D" { part += " DESC" }
+            if drafts.last?.original == name {
+                drafts[drafts.count - 1].columns.append(part)
+            } else {
+                let type = row[2].display.uppercased()
+                let kind: IndexDraft.Kind = type == "FULLTEXT" ? .fulltext : type == "SPATIAL" ? .spatial : row[1].display == "0" ? .unique : .index
+                drafts.append(IndexDraft(name: name, kind: kind, columns: [part], original: name))
+            }
+        }
+        return drafts.filter { !expressions.contains($0.name) }
     }
 
     /// What's wrong with the draft, for the editor to show; nil when it can be saved.
-    static func problem(name: String, columns: [ColumnDraft]) -> String? {
+    static func problem(name: String, columns: [ColumnDraft], indexes: [IndexDraft] = []) -> String? {
+        if let problem = indexProblem(columns: columns, indexes: indexes) { return problem }
+        return columnProblem(name: name, columns: columns)
+    }
+
+    private static func indexProblem(columns: [ColumnDraft], indexes: [IndexDraft]) -> String? {
+        let names = Set(columns.map { $0.name.lowercased() })
+        let named = indexes.map { $0.name.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+        if Set(named).count != named.count { return tr("索引名稱不能重複。", "Index names must be different.") }
+        if named.contains("primary") { return tr("索引不能命名為 PRIMARY，主鍵請用欄位的「主鍵」勾選。", "An index can’t be called PRIMARY; tick Key on the columns instead.") }
+        for index in indexes {
+            let label = index.name.isEmpty ? tr("新索引", "A new index") : tr("索引「\(index.name)」", "The index “\(index.name)”")
+            if index.columns.isEmpty { return tr("\(label)至少要有一個欄位。", "\(label) needs at least one column.") }
+            if let missing = index.columns.map(IndexDraft.column(of:)).first(where: { !names.contains($0.lowercased()) }) {
+                return tr("\(label)用到的欄位「\(missing)」不在資料表裡。", "\(label) uses “\(missing)”, which isn’t a column of the table.")
+            }
+        }
+        return nil
+    }
+
+    private static func columnProblem(name: String, columns: [ColumnDraft]) -> String? {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return tr("請輸入資料表名稱。", "Enter a name for the table.") }
         if columns.isEmpty { return tr("資料表至少要有一個欄位。", "A table needs at least one column.") }
         let names = columns.map { $0.name.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -78,13 +184,14 @@ enum TableDesign {
 
     // MARK: Creating
 
-    static func createSQL(name: String, columns: [ColumnDraft]) -> String {
+    static func createSQL(name: String, columns: [ColumnDraft], indexes: [IndexDraft] = []) -> String {
         var lines = columns.map(definition)
         let keys = columns.filter(\.primaryKey)
         if !keys.isEmpty { lines.append("PRIMARY KEY (" + keys.map { Database.quote($0.name) }.joined(separator: ", ") + ")") }
         for column in columns where column.unique && !column.primaryKey {
             lines.append("UNIQUE KEY (\(Database.quote(column.name)))")
         }
+        lines += indexes.map(\.definition)
         return "CREATE TABLE \(Database.quote(name)) (\n    " + lines.joined(separator: ",\n    ") + "\n);"
     }
 
@@ -121,7 +228,7 @@ enum TableDesign {
 
     /// The ALTER TABLE that turns the table as it is into the edited one, and what the change
     /// gives up (a dropped column's data, say), to show before it runs.
-    static func alterSQL(_ table: TableSnapshot, newName: String, columns: [ColumnDraft]) -> (sql: String, warnings: [String]) {
+    static func alterSQL(_ table: TableSnapshot, newName: String, columns: [ColumnDraft], indexes: [IndexDraft]? = nil) -> (sql: String, warnings: [String]) {
         var clauses: [String] = [], warnings: [String] = []
         let before = table.columns
         let dropped = before.filter { old in !columns.contains { $0.original == old.name } }
@@ -173,9 +280,32 @@ enum TableDesign {
             }
         }
 
+        clauses += indexClauses(table, columns: columns, indexes: indexes ?? table.indexes)
+
         if newName != table.name { clauses.append("RENAME TO \(Database.quote(newName))") }
         guard !clauses.isEmpty else { return ("", []) }
         return ("ALTER TABLE \(Database.quote(table.name))\n  " + clauses.joined(separator: ",\n  ") + ";", warnings)
+    }
+
+    /// Dropping the indexes taken out or changed, and adding the changed and new ones. An index is
+    /// compared with the table's as its columns now stand: MySQL renames an index's columns with
+    /// them and drops a dropped column from its indexes itself, so those need nothing here.
+    private static func indexClauses(_ table: TableSnapshot, columns: [ColumnDraft], indexes: [IndexDraft]) -> [String] {
+        let renames = Dictionary(columns.compactMap { c in c.original.map { ($0, c.name) } }, uniquingKeysWith: { a, _ in a })
+        var drops: [String] = [], adds: [String] = []
+        for old in table.indexes {
+            var now = old
+            now.columns = old.columns.compactMap { part in renames[IndexDraft.column(of: part)].map { IndexDraft.renaming(part, to: $0) } }
+            if let edited = indexes.first(where: { $0.original == old.name }) {
+                guard edited != now else { continue }
+                if !now.columns.isEmpty { drops.append("DROP INDEX \(Database.quote(old.name))") }
+                adds.append("ADD " + edited.definition)
+            } else if !now.columns.isEmpty {
+                drops.append("DROP INDEX \(Database.quote(old.name))")
+            }
+        }
+        adds += indexes.filter { $0.original == nil }.map { "ADD " + $0.definition }
+        return drops + adds
     }
 
     /// Runs a change.

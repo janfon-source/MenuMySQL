@@ -29,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleExecutable</key><string>MenuMySQL</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>2026.a23</string>
-	<key>CFBundleVersion</key><string>2026.a23</string>
+	<key>CFBundleShortVersionString</key><string>2026.a24</string>
+	<key>CFBundleVersion</key><string>2026.a24</string>
 	<key>CFBundleDevelopmentRegion</key><string>zh_TW</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
@@ -41,7 +41,18 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP"
+# The keychain lets an app read the passwords it saved by the app's signature. An ad-hoc
+# signature changes with every build, so the keychain would ask again each time; a certificate
+# of one's own keeps the signature the same. It shares 隨手藏's (Keychain Access → Certificate
+# Assistant → Create a Certificate, type Code Signing, named as below); without it the build is
+# signed ad hoc.
+IDENTITY="MenuHide Local Signing"
+if security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
+  codesign --force --sign "$IDENTITY" "$APP"
+else
+  codesign --force --sign - "$APP"
+  echo "No \"$IDENTITY\" certificate: signed ad hoc, so the keychain will ask again for saved passwords after each build." >&2
+fi
 echo "Built $APP"
 
 if [[ "${1:-}" == "install" ]]; then

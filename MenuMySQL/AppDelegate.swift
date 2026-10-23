@@ -212,4 +212,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openFromMenu() { showPopover() }
+
+    /// Every connection closes as the app quits, SSH tunnels included.
+    func applicationWillTerminate(_ notification: Notification) {
+        main.closeAll()
+    }
 }

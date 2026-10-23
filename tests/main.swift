@@ -127,13 +127,55 @@ for port in ports.isEmpty ? [23306, 13306] : ports {
         try TableDesign.apply(TableDesign.alterSQL(unchanged, newName: "goods", columns: keyed).sql, to: db)
         expect(try db.primaryKey(of: "goods"), ["id", "code"], "two-column key")
 
+        // Indexes: made with the table, then changed through the editor's drafts.
+        let articleColumns = [ColumnDraft(name: "id", type: "INT", primaryKey: true, notNull: true, autoincrement: true),
+                              ColumnDraft(name: "title", type: "VARCHAR(200)"), ColumnDraft(name: "body", type: "TEXT"),
+                              ColumnDraft(name: "author", type: "VARCHAR(50)"), ColumnDraft(name: "created", type: "DATETIME")]
+        try TableDesign.apply(TableDesign.createSQL(name: "articles", columns: articleColumns, indexes: [
+            IndexDraft(name: "by_author", columns: ["author", "created DESC"]),
+            IndexDraft(name: "ft_text", kind: .fulltext, columns: ["title", "body"]),
+            IndexDraft(name: "uq_title", kind: .unique, columns: ["title(50)", "author"]),
+        ]), to: db)
+        var art = try TableDesign.snapshot(of: "articles", in: db)
+        expect(art.indexes.map(\.name), ["by_author", "ft_text", "uq_title"], "indexes read back")
+        expect(art.indexes.first { $0.name == "uq_title" }?.columns, ["title(50)", "author"], "prefix length read back")
+        expect(art.indexes.first { $0.name == "ft_text" }?.kind, .fulltext, "fulltext kind")
+        expect(TableDesign.alterSQL(art, newName: "articles", columns: art.columns).sql, "", "indexes unchanged, no SQL")
+        // Renaming a column its indexes use: MySQL carries them along, so no index clause.
+        var cols = art.columns
+        cols[3].name = "writer"
+        var idx = art.indexes.map { draft -> IndexDraft in
+            var d = draft; d.columns = d.columns.map { IndexDraft.column(of: $0) == "author" ? IndexDraft.renaming($0, to: "writer") : $0 }; return d
+        }
+        let renameOnly = TableDesign.alterSQL(art, newName: "articles", columns: cols, indexes: idx).sql
+        check(!renameOnly.contains("INDEX"), "rename leaves indexes alone: \(renameOnly)")
+        try TableDesign.apply(renameOnly, to: db)
+        // Change one, rename one, drop one, add one with a prefix and an order.
+        art = try TableDesign.snapshot(of: "articles", in: db)
+        idx = art.indexes
+        idx[idx.firstIndex { $0.name == "by_author" }!].columns = ["writer"]
+        idx[idx.firstIndex { $0.name == "uq_title" }!].name = "uq_title_writer"
+        idx.removeAll { $0.name == "ft_text" }
+        idx.append(IndexDraft(name: "recent", columns: ["created DESC", "title(10)"]))
+        try TableDesign.apply(TableDesign.alterSQL(art, newName: "articles", columns: art.columns, indexes: idx).sql, to: db)
+        art = try TableDesign.snapshot(of: "articles", in: db)
+        expect(art.indexes.map(\.name), ["by_author", "recent", "uq_title_writer"], "indexes after editing")
+        expect(art.indexes.first { $0.name == "recent" }?.columns, ["created DESC", "title(10)"], "prefix and DESC")
+        expect(art.indexes.first { $0.name == "by_author" }?.columns, ["writer"], "changed columns")
+        // Dropping a column: the index on it alone goes with it, without a DROP INDEX of ours.
+        cols = art.columns.filter { $0.name != "created" }
+        idx = art.indexes.compactMap { d in var d = d; d.columns.removeAll { IndexDraft.column(of: $0) == "created" }; return d.columns.isEmpty ? nil : d }
+        try TableDesign.apply(TableDesign.alterSQL(art, newName: "articles", columns: cols, indexes: idx).sql, to: db)
+        expect(try TableDesign.snapshot(of: "articles", in: db).indexes.map(\.name), ["by_author", "recent", "uq_title_writer"], "index kept on its other column")
+        check(TableDesign.problem(name: "t", columns: cols, indexes: [IndexDraft(name: "x", columns: ["nope"])]) != nil, "unknown column flagged")
+
         // Views.
         try db.run(ViewDesign.sql(name: "cheap", columns: "", select: "SELECT id, title FROM goods WHERE price < 5;"))
         let view = DatabaseObject(name: "cheap", kind: .view)
         let parts = ViewDesign.parts(of: try db.createStatement(of: view) ?? "")
         check(parts.select.lowercased().hasPrefix("select"), "view's select: \(parts.select)")
         try db.run(ViewDesign.sql(name: "cheap2", columns: "a, b", select: parts.select, replacing: "cheap"))
-        expect(try db.objects().map(\.name), ["goods", "cheap2"], "renamed view")
+        expect(try db.objects().map(\.name), ["articles", "goods", "cheap2"], "renamed view")
         expect(try ViewDesign.preview("SELECT * FROM cheap2", in: db).columns, ["a", "b"], "view preview")
 
         // Structure document runs through everything.

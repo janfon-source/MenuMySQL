@@ -156,7 +156,7 @@ struct ServerLocation: Equatable {
         return "mysql://" + encode(user) + "@" + encode(host) + ":\(port)" + (fields.isEmpty ? "" : "?" + fields.joined(separator: "&"))
     }
 
-    /// Whose password this is, for the keychain: the account on the server, whichever database.
+    /// Whose password this is, for the password store: the account on the server, whichever database.
     var account: String {
         "\(user)@\(host):\(port)" + (usesSSH ? " via \(sshDestination!)" : "")
     }
@@ -203,6 +203,9 @@ final class MySQLDatabase {
     private var lastUsed = Date()
     private(set) var serverVersion = ""
     private(set) var usesTLS = false
+    /// Whether this server's strings take backslash escapes; `Database.backslashEscapes` follows
+    /// the connection in use, set when its tab is shown.
+    private(set) var backslashEscapes = true
     /// Whether the account may change anything: false when it was granted SELECT alone, say.
     /// The server has the final say; this only greys out what would certainly fail.
     let readOnly = false
@@ -263,7 +266,8 @@ final class MySQLDatabase {
         lastUsed = Date()
         _ = try execute("SET NAMES utf8mb4")
         let mode = try execute("SELECT @@SESSION.sql_mode").last?.rows.first?.first?.display ?? ""
-        Database.backslashEscapes = !mode.contains("NO_BACKSLASH_ESCAPES")
+        backslashEscapes = !mode.contains("NO_BACKSLASH_ESCAPES")
+        Database.backslashEscapes = backslashEscapes
     }
 
     /// The connection, made again if it broke or the server may have dropped it while idle.

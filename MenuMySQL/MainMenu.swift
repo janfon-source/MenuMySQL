@@ -11,7 +11,11 @@ enum MainMenu {
 
         let file = submenu(in: main, tr("檔案", "File"))
         add(file, tr("連線到伺服器…", "Connect to a Server…"), #selector(MainViewController.connect(_:)), "o", target: controller)
-        add(file, tr("中斷連線", "Disconnect"), #selector(MainViewController.disconnect(_:)), "", target: controller)
+        add(file, tr("透過 SSH 連線…", "Connect through SSH…"), #selector(MainViewController.connectSSH(_:)), "O", target: controller)
+        add(file, tr("關閉標籤頁並中斷連線", "Close Tab and Disconnect"), #selector(MainViewController.disconnect(_:)), "w", target: controller)
+            .keyEquivalentModifierMask = [.command, .option]
+        add(file, tr("將目前的連線加入常用資料庫…", "Add This Connection to Favorites…"), #selector(MainViewController.addToFavorites(_:)), "d", target: controller)
+        add(file, tr("管理常用資料庫…", "Manage Favorite Databases…"), #selector(MainViewController.manageFavorites(_:)), "", target: controller)
         add(file, tr("新增資料庫…", "New Database…"), #selector(MainViewController.newDatabase(_:)), "n", target: controller)
         add(file, tr("重新整理", "Refresh"), #selector(MainViewController.refresh(_:)), "r", target: controller)
         file.addItem(.separator())
@@ -43,7 +47,14 @@ enum MainMenu {
         add(view, tr("結構", "Structure"), #selector(MainViewController.showStructureTab(_:)), "2", target: controller)
         add(view, "SQL", #selector(MainViewController.showQueryTab(_:)), "3", target: controller)
         view.addItem(.separator())
+        add(view, tr("下一個標籤頁", "Next Tab"), #selector(MainViewController.nextTab(_:)), "\t", target: controller)
+            .keyEquivalentModifierMask = [.control]
+        add(view, tr("上一個標籤頁", "Previous Tab"), #selector(MainViewController.previousTab(_:)), "\t", target: controller)
+            .keyEquivalentModifierMask = [.control, .shift]
+        view.addItem(.separator())
         add(view, tr("篩選資料列", "Filter Rows"), #selector(MainViewController.toggleFilter(_:)), "f", target: controller)
+            .keyEquivalentModifierMask = [.command, .option]
+        add(view, tr("選擇要顯示的欄位…", "Choose the Columns to Show…"), #selector(MainViewController.showColumnsMenu(_:)), "k", target: controller)
             .keyEquivalentModifierMask = [.command, .option]
 
         let query = submenu(in: main, tr("查詢", "Query"))

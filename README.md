@@ -7,13 +7,18 @@ A lightweight MySQL and MariaDB manager that lives in the macOS menu bar. Click 
 ## Features
 
 - **Connects to MySQL and MariaDB** directly, speaking their protocol itself: nothing else to install. Signs in with `caching_sha2_password` (MySQL 8 and later), `mysql_native_password` and `sha256_password`; uses TLS when the server offers it (or always, or never, as you choose). Without TLS, the SHA-256 password exchange goes encrypted with the server's RSA key.
-- **SSH tunnel**: for a server that only takes local connections, tick the tunnel box and give the SSH server (`user@host`, or a Host in `~/.ssh/config`, which fills in its port and key). MenuMySQL forwards a local port with `ssh -N -L` and closes it when you disconnect. Signs in to SSH with keys or ssh-agent; it never asks for an SSH password.
-- **Passwords in the keychain**: tick “Save the password” and recent connections open without asking.
+- **Connect through SSH** (choose “Through SSH” at the top of the connection dialog, ⌘O, or go straight there with ⇧⌘O): for a database on a server that only takes connections from the server itself. Give the SSH server (`user@host`, or a Host in `~/.ssh/config`, which fills in its port and key), then the database as that machine sees it (usually `127.0.0.1`), the account and password. MenuMySQL forwards a local port with `ssh -N -L` and closes it when you disconnect. Signs in to SSH with keys or ssh-agent; it never asks for an SSH password.
+- **Remembered passwords**: tick “Remember the password” and recent connections and favorites open without asking. Passwords are encrypted (AES-GCM) in `~/Library/Application Support/MenuMySQL`, readable only by your account, so macOS never asks for keychain access, even after an update. Passwords earlier versions saved in the keychain move over the first time they're used.
+- **Favorite databases** (the star button): connect to a favorite in one click. “Add This Connection to Favorites…” (⌘D) keeps the connection in use, with the database open now, under a name of your own; “Manage Favorite Databases…” lists them to add, duplicate, edit and delete, drag into the order the star menu shows, and connect (double-click or Connect). Adding and editing use the connection form, with SSH, TLS and the password, plus the name.
+- **Several connections at once, in tabs**: each connection (from the connection dialog, a favorite or the recent list) opens in a tab of its own under the toolbar, named after its favorite when it's one, or else its database (hover for the server). Click a tab to switch (⌃Tab / ⌃⇧Tab go to the next and previous), and drag one along the strip to put the tabs in another order; each keeps its table, page, sort, filter, SQL and results as you left them. The same database can be open in several tabs, each on a connection of its own, numbered (2), (3)… from the second. × closes a tab and its connection (and SSH tunnel) with it, as does ⌥⌘W; ＋ connects in a new tab.
 - **Switch databases** from the menu at the top of the list; the server's own (`mysql`, `sys`, `information_schema`, `performance_schema`) come last. Create a database (with its character set) or delete one (you type its name to confirm) from the same menu, or ⌘N.
 - **Browse** tables and views on the left and their rows on the right; click a header to sort; 200 rows a page. NULLs and BLOBs show dimmed; DECIMALs and dates show exactly as the server writes them.
 - **Filter rows** (⌥⌘F): column, comparison (`=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `IS EMPTY`, `IS NOT EMPTY`) and value, joined by AND or OR. The count and paging follow the filter, and the SQL tab starts with the matching SELECT.
+- **Choose the columns to show** (the checklist button beside the filter, or ⌥⌘K): a checkbox for each column of the table or view; untick one to hide it, and the menu stays open for the next. All columns show to begin with, and “Show All” brings them back. Each table remembers its choice while the app runs; the status line says how many are hidden, ⌘C copies only the columns shown, and the SQL tab’s SELECT lists them.
+- **Reload the rows** (the arrow button under the rows): reads the page showing again, keeping the filter, sort and page, for rows another program or the SQL tab has changed.
+- **Export what the Data tab shows** (the share button under the rows): every row the filter lets through, in the sort shown and only the columns showing, to a CSV file, however many rows there are (not just the page of 200). The same button under the SQL tab exports its results: the SELECT written to match the Data tab is run again without its LIMIT 100, and your own SQL's results are written as they show (it isn't run again, as it may change data).
 - **Edit in place**: double-click a cell to change it, right-click to set it to NULL, add or delete rows with ＋ / −. Rows are found again by the primary key (or a unique index on columns that can't be NULL); tables without one, and views, are read-only.
-- **Create and edit tables**: name, type, primary key, not null, unique, AUTO_INCREMENT, default and comment for each column; add, remove, reorder and rename columns and rename the table. The change is one `ALTER TABLE` (shown live as you edit), which keeps data through renames and moves and applies whole or not at all; what you can't see in the grid (collation, `ON UPDATE CURRENT_TIMESTAMP`, generated columns) is kept.
+- **Create and edit tables**: name, type, primary key, not null, unique, AUTO_INCREMENT, default and comment for each column; add, remove, reorder and rename columns and rename the table. The change is one `ALTER TABLE` (shown live as you edit), which keeps data through renames and moves and applies whole or not at all; what you can't see in the grid (collation, `ON UPDATE CURRENT_TIMESTAMP`, generated columns) is kept. Below the columns, **indexes**: add, change and remove them with a name, a kind (INDEX, UNIQUE, FULLTEXT, SPATIAL) and columns, typed (with a prefix length or DESC, as in `title(20), created DESC`) or ticked from a menu; they follow a column that's renamed, and lose one that's deleted. The key and single-column unique indexes stay the Key and Unique boxes.
 - **Create and edit views**: name, optional column names and the SELECT, with a preview of its first 50 rows (⌘↩). Saving uses `CREATE OR REPLACE VIEW`.
 - **Structure**: columns (type, not null, default, key, AUTO_INCREMENT, comments), indexes, row count and the syntax-colored `SHOW CREATE` statement.
 - **Run SQL** with ⌘↩: the selection, or everything; several statements at once. Shows the results, rows changed, time taken or the server's error.
@@ -25,6 +30,10 @@ A lightweight MySQL and MariaDB manager that lives in the macOS menu bar. Click 
 | Shortcut | Action |
 |---|---|
 | ⌘O | Connect to a server |
+| ⇧⌘O | Connect through SSH |
+| ⌘D | Add this connection to favorites |
+| ⌃Tab / ⌃⇧Tab | Next / previous connection tab |
+| ⌥⌘W | Close the tab and disconnect |
 | ⌘N | New database |
 | ⌘R | Refresh |
 | ⌥⌘N / ⌥⇧⌘N | New table / New view |
@@ -32,6 +41,7 @@ A lightweight MySQL and MariaDB manager that lives in the macOS menu bar. Click 
 | ⇧⌘D | Structure document (Markdown) |
 | ⌘1 / ⌘2 / ⌘3 | Data / Structure / SQL tab |
 | ⌥⌘F | Filter rows |
+| ⌥⌘K | Choose the columns to show |
 | ⌘↩ | Run SQL |
 | ⌘I | Database info |
 | ⇧⌘I / ⇧⌘E | Import / Export CSV |
@@ -77,13 +87,18 @@ Run `./build.sh` alone to build into `build/隨手MySQL.app` without installing.
 ### 功能
 
 - **直接連線 MySQL 和 MariaDB**：程式自己實作連線協定，不必另外安裝任何東西。支援 `caching_sha2_password`（MySQL 8 以後的預設）、`mysql_native_password`、`sha256_password` 登入；伺服器支援就用 TLS 加密（也可設成一定要用或不用）。沒有 TLS 時，SHA-256 的密碼交換會用伺服器的 RSA 公鑰加密後再送出。
-- **SSH 通道**：伺服器只接受本機連線時，勾選「透過 SSH 通道連線」並填 SSH 主機（`user@host`，或 `~/.ssh/config` 裡的 Host，選了會自動帶入連接埠和私鑰）。隨手MySQL 用 `ssh -N -L` 轉接一個本機連接埠，中斷連線時一併關閉。SSH 用金鑰或 ssh-agent 登入，不會詢問 SSH 密碼。
-- **密碼存在鑰匙圈**：勾選「把密碼存在鑰匙圈」，之後從最近的連線開啟就不必再輸入。
+- **透過 SSH 連線**（連線視窗〔⌘O〕上方選「透過 SSH」，或按 ⇧⌘O 直接開啟）：資料庫在只接受本機連線的伺服器上時使用。先填 SSH 主機（`user@host`，或 `~/.ssh/config` 裡的 Host，選了會自動帶入連接埠和私鑰），再填從那台機器看到的資料庫位址（通常是 `127.0.0.1`）、帳號和密碼。隨手MySQL 用 `ssh -N -L` 轉接一個本機連接埠，中斷連線時一併關閉。SSH 用金鑰或 ssh-agent 登入，不會詢問 SSH 密碼。
+- **記住密碼**：勾選「記住密碼」，之後從最近的連線或常用資料庫開啟就不必再輸入。密碼以 AES-GCM 加密存在 `~/Library/Application Support/MenuMySQL`，只有你的帳號能讀取，所以不會再跳出鑰匙圈授權，更新版本後也一樣。舊版存在鑰匙圈的密碼，第一次用到時會搬過來。
+- **常用資料庫**（工具列的星號按鈕）：點一下就連上常用的資料庫。「將目前的連線加入常用資料庫…」（⌘D）把目前成功連上的連線和正在使用的資料庫存成自訂名稱；「管理常用資料庫…」可以新增、複製、編輯、刪除，拖曳調整星號選單裡的順序，雙擊或按「連線」就能連上。新增和編輯用的是連線表單，可設定 SSH、TLS 和密碼，再加上名稱。
+- **同時連接多個資料庫，以標籤頁切換**：每個連線（從連線視窗、常用資料庫或最近的連線開啟）都在工具列下方有自己的標籤頁，名稱是常用資料庫裡設定的名稱，不是常用資料庫就顯示資料庫名稱（滑鼠移上去可看主機）。點標籤切換（⌃Tab／⌃⇧Tab 切到下一個／上一個），左右拖曳標籤可以調整前後順序，每個標籤都保留自己的資料表、頁數、排序、篩選、SQL 和查詢結果。同一個資料庫可以在多個標籤頁同時開啟，各自使用獨立的連線，第二個起標上 (2)、(3)…。按 × 或 ⌥⌘W 關閉標籤頁，同時中斷該資料庫的連線（含 SSH 通道）；按 ＋ 在新標籤頁連線。
 - **切換資料庫**：資料表清單上方的選單列出伺服器上的資料庫，系統的（`mysql`、`sys`、`information_schema`、`performance_schema`）排在最後；同一個選單也可以新增資料庫（可選字元集）或刪除目前的資料庫（要輸入名稱確認），新增也可以按 ⌘N。
 - **瀏覽**：左邊是資料表和視圖，右邊是資料；點欄位標題排序，每頁 200 列。NULL 和 BLOB 以淡色顯示；DECIMAL 和日期照伺服器的寫法完整顯示。
 - **篩選資料列**（⌥⌘F）：選欄位、比較方式和值，可以用 AND／OR 加多個條件；列數和分頁跟著篩選，SQL 分頁也會帶出對應的 SELECT。
+- **選擇要顯示的欄位**（篩選按鈕旁的清單按鈕，或 ⌥⌘K）：下拉選單列出資料表或視圖的每個欄位，取消勾選就隱藏，選單不會關閉，可以連續調整。預設全部顯示，「全部顯示」可一次恢復。每個資料表的選擇在 App 執行期間都會記住；狀態列會顯示隱藏了幾欄，⌘C 只拷貝顯示中的欄位，SQL 分頁的 SELECT 也只列出這些欄位。
+- **重新載入資料**（資料下方的箭頭按鈕）：重新讀取目前這一頁，篩選、排序和頁數不變，用來看其他程式或 SQL 分頁改過的資料。
+- **匯出資料畫面的內容**（資料下方的匯出按鈕）：依目前的篩選條件、排序和顯示中的欄位，把全部符合的資料列匯出成 CSV，不受每頁 200 列的限制。SQL 分頁下方的同一個按鈕匯出查詢結果：從資料分頁自動帶入的 SELECT 會拿掉 LIMIT 100 重新查詢；自己寫的 SQL 則匯出畫面上的結果，不會重新執行（以免再次改到資料）。
 - **直接編輯**：雙擊儲存格修改，右鍵設為 NULL，狀態列的 ＋／− 新增或刪除資料列。用主鍵（或欄位都不允許 NULL 的唯一索引）找回每一列；沒有這種鍵的資料表和視圖是唯讀的。
-- **新增與編輯資料表**：每個欄位的名稱、類型、主鍵、非空、唯一、自動遞增、預設值和註解；可以新增、刪除、調整順序、改名，也能改資料表名稱。變更會組成一個 `ALTER TABLE`（編輯時即時顯示），改名和移動欄位時資料會跟著走，整個成功或整個不做；表格上看不到的設定（定序、`ON UPDATE CURRENT_TIMESTAMP`、產生的欄位）會保留。
+- **新增與編輯資料表**：每個欄位的名稱、類型、主鍵、非空、唯一、自動遞增、預設值和註解；可以新增、刪除、調整順序、改名，也能改資料表名稱。變更會組成一個 `ALTER TABLE`（編輯時即時顯示），改名和移動欄位時資料會跟著走，整個成功或整個不做；表格上看不到的設定（定序、`ON UPDATE CURRENT_TIMESTAMP`、產生的欄位）會保留。欄位下方是**索引**：可以新增、修改、刪除，設定名稱、類型（INDEX、UNIQUE、FULLTEXT、SPATIAL）和欄位；欄位可以直接輸入（可加長度或 DESC，例如 `title(20), created DESC`），也可以從選單勾選。欄位改名時索引跟著改，刪除欄位時也會從索引移除。主鍵和單一欄位的唯一索引仍用欄位的「主鍵」「唯一」勾選。
 - **新增與編輯視圖**：名稱、欄位名稱（選填）和 SELECT，可以預覽前 50 列（⌘↩），儲存時用 `CREATE OR REPLACE VIEW`。
 - **結構**：欄位（類型、非空、預設值、主鍵、自動遞增、註解）、索引、資料列數，以及上色的 `SHOW CREATE` 語句。
 - **執行 SQL**（⌘↩）：有選取就只執行選取的部分，可以一次執行多個語句；顯示結果、影響列數、花費時間或伺服器的錯誤訊息。
