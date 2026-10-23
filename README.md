@@ -40,10 +40,25 @@ A lightweight MySQL and MariaDB manager that lives in the macOS menu bar. Click 
 
 ## Install
 
-Requires macOS 13 or later. Build from source with Xcode or the Command Line Tools (`xcode-select --install`):
+Requires macOS 13 or later, on Intel or Apple silicon.
+
+### Download
+
+Paste this into Terminal to download the latest version, install it in Applications and open it:
 
 ```sh
-cd MenuMySQLMac
+curl -L https://github.com/janfon-source/MenuMySQL/releases/latest/download/MenuMySQL.zip -o /tmp/MenuMySQL.zip && ditto -x -k /tmp/MenuMySQL.zip /Applications && open /Applications/隨手MySQL.app
+```
+
+Or download the zip from [Releases](https://github.com/janfon-source/MenuMySQL/releases/latest), unzip it and move 隨手MySQL to Applications. The app isn't notarized, so a browser download is blocked the first time: try to open it, click Done at the warning, then click Open Anyway in System Settings → Privacy & Security. The Terminal command above avoids this.
+
+### Build from source
+
+Requires Xcode or the Command Line Tools (`xcode-select --install`).
+
+```sh
+git clone https://github.com/janfon-source/MenuMySQL.git
+cd MenuMySQL
 ./build.sh install   # builds and installs /Applications/隨手MySQL.app
 ```
 
@@ -79,14 +94,29 @@ Run `./build.sh` alone to build into `build/隨手MySQL.app` without installing.
 
 ### 安裝
 
-需要 macOS 13 以上。用 Xcode 或 Command Line Tools（`xcode-select --install`）從原始碼編譯：
+需要 macOS 13 以上，Intel 和 Apple 晶片的 Mac 都可以。
+
+#### 直接下載
+
+在「終端機」貼上這一行，會下載最新版、安裝到「應用程式」並打開：
 
 ```sh
-cd MenuMySQLMac
+curl -L https://github.com/janfon-source/MenuMySQL/releases/latest/download/MenuMySQL.zip -o /tmp/MenuMySQL.zip && ditto -x -k /tmp/MenuMySQL.zip /Applications && open /Applications/隨手MySQL.app
+```
+
+也可以到 [Releases](https://github.com/janfon-source/MenuMySQL/releases/latest) 下載壓縮檔，解壓縮後把「隨手MySQL」拖到「應用程式」。隨手MySQL 沒有經過 Apple 公證，用瀏覽器下載的版本第一次打開會被擋下：先打開一次，出現警告後按「完成」，再到「系統設定」→「隱私權與安全性」，在下方按「強制打開」。用上面的終端機指令安裝則不會被擋。
+
+#### 從原始碼編譯
+
+需要 Xcode 或 Command Line Tools（`xcode-select --install`）。
+
+```sh
+git clone https://github.com/janfon-source/MenuMySQL.git
+cd MenuMySQL
 ./build.sh install   # 編譯並安裝到 /Applications/隨手MySQL.app
 ```
 
-只執行 `./build.sh` 會編譯到 `build/隨手MySQL.app`，不安裝。
+只想編譯不安裝就執行 `./build.sh`，結果在 `build/隨手MySQL.app`。
 
 ### 測試
 
