@@ -41,17 +41,16 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# The keychain lets an app read the passwords it saved by the app's signature. An ad-hoc
-# signature changes with every build, so the keychain would ask again each time; a certificate
-# of one's own keeps the signature the same. It shares 隨手藏's (Keychain Access → Certificate
-# Assistant → Create a Certificate, type Code Signing, named as below); without it the build is
-# signed ad hoc.
+# Saved passwords live in the app's own encrypted store (Passwords.swift), not the keychain, so
+# nothing depends on the signature staying the same between builds; the keychain is only read
+# once per account, to move over passwords earlier versions saved there. It still signs with
+# 隨手藏's certificate when there is one (Keychain Access → Certificate Assistant → Create a
+# Certificate, type Code Signing, named as below), and ad hoc otherwise.
 IDENTITY="MenuHide Local Signing"
 if security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
   codesign --force --sign "$IDENTITY" "$APP"
 else
   codesign --force --sign - "$APP"
-  echo "No \"$IDENTITY\" certificate: signed ad hoc, so the keychain will ask again for saved passwords after each build." >&2
 fi
 echo "Built $APP"
 
