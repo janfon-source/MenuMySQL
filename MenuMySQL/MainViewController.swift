@@ -499,7 +499,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private func askConnection(ssh: Bool?) {
         // Empty each time: earlier connections are a click away in the recent and favorite menus.
-        let form = ConnectionForm(start: nil, password: nil, ssh: ssh)
+        let form = ConnectionForm(start: nil, password: nil, ssh: ssh, offerFavorites: true)
         let alert = NSAlert()
         alert.messageText = ssh == true ? tr("透過 SSH 連線到 MySQL 或 MariaDB", "Connect to MySQL or MariaDB through SSH")
                                         : tr("連線到 MySQL 或 MariaDB 伺服器", "Connect to a MySQL or MariaDB Server")
@@ -509,7 +509,14 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         alert.addButton(withTitle: tr("連線", "Connect"))
         alert.addButton(withTitle: tr("取消", "Cancel"))
         alert.window.initialFirstResponder = form.firstField
+        // The form grows and shrinks as the choice changes (no SSH fields for a direct
+        // connection, just a menu for a favorite); the dialog follows.
+        form.onResize = { [weak alert] in alert?.layout() }
         guard keepingPopoverOpen({ alert.runModal() }) == .alertFirstButtonReturn else { return }
+        if form.choosingFavorite {
+            if let favorite = form.chosenFavorite { open(favorite.location) }   // its saved password, or asked for
+            return
+        }
         let location: ServerLocation
         switch form.location {
         case .success(let entered): location = entered

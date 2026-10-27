@@ -1,10 +1,10 @@
 import AppKit
 
-/// The fields for connecting to a server, directly or through SSH. Through SSH, the SSH server
-/// comes first (picked from ~/.ssh/config, which fills in its port and key), then the database
-/// server as that machine sees it, usually 127.0.0.1; then the account, password, database and
-/// TLS. Every field is always there, the SSH ones greyed out for a direct connection, so the
-/// alert holding the form keeps its size when the choice changes.
+/// The fields for connecting to a server, directly or through SSH, or (in the connection dialog)
+/// to one of the favorites. Through SSH, the SSH server comes first (picked from ~/.ssh/config,
+/// which fills in its port and key), then the database server as that machine sees it, usually
+/// 127.0.0.1; then the account, password, database and TLS. A direct connection shows no SSH
+/// fields, and a favorite only its picker; the dialog holding the form resizes to suit.
 final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
     let view: NSGridView
     private let mode = NSSegmentedControl()
@@ -27,7 +27,6 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
     private let database: NSTextField
     private let tls = NSPopUpButton()
     private let hosts: [SSHHost]
-    private var sshLabels: [NSTextField] = []
     /// The favorite's name, when the form edits one.
     private var nameField: NSTextField?
     /// The account the password in the field belongs to. Another server or user empties it, so
@@ -35,18 +34,40 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
     private var passwordAccount: String?
 
     private var viaSSH: Bool { mode.selectedSegment == 1 }
+    /// The third choice, offered in the connection dialog: one of the favorites.
+    private var viaFavorite: Bool { mode.selectedSegment == 2 }
+    private let favoritePicker = NSPopUpButton()
+    private let favoriteSummary = NSTextField(labelWithString: "")
+    private let favorites: [Favorite]
+    /// The rows each choice shows: the SSH server's, the database server's, the favorite's.
+    private var sshRows: [NSGridRow] = []
+    private var serverRows: [NSGridRow] = []
+    private var favoriteRows: [NSGridRow] = []
+    /// Called when the form changes height, for the dialog to fit it.
+    var onResize: (() -> Void)?
+
+    /// Whether the choice is a favorite (picked or not: there may be none yet).
+    var choosingFavorite: Bool { viaFavorite }
+
+    /// The favorite picked, when connecting to one.
+    var chosenFavorite: Favorite? {
+        guard viaFavorite, favoritePicker.indexOfSelectedItem >= 0, favoritePicker.indexOfSelectedItem < favorites.count else { return nil }
+        return favorites[favoritePicker.indexOfSelectedItem]
+    }
 
     var firstField: NSView {
+        if viaFavorite { return favoritePicker }
         if let nameField, nameField.stringValue.isEmpty { return nameField }
         if viaSSH, sshHost.stringValue.isEmpty { return sshHost }
         return host.stringValue.isEmpty ? host : passwordText.isEmpty ? (revealed ? plainPassword : password) : database
     }
 
     /// `ssh` starts the form on the SSH choice, whatever `start` used. With `name`, the form
-    /// starts with a field for a favorite's name.
+    /// starts with a field for a favorite's name. `offerFavorites` adds the choice of a favorite.
     init(start: ServerLocation?, password saved: String?, ssh: Bool? = nil, name: String? = nil,
-         hosts: [SSHHost] = SSHConfig.hosts()) {
+         offerFavorites: Bool = false, hosts: [SSHHost] = SSHConfig.hosts()) {
         self.hosts = hosts
+        favorites = offerFavorites ? Favorites.all : []
         func field(_ value: String, _ placeholder: String) -> NSTextField {
             let field = NSTextField(string: value)
             field.placeholderString = placeholder
@@ -95,9 +116,10 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         tls.addItems(withTitles: [tr("伺服器支援就使用（建議）", "When the server offers it (recommended)"),
                                   tr("一定要使用", "Required"), tr("不使用", "Off")])
         tls.selectItem(at: MySQLWire.TLSMode.allCases.firstIndex(of: start.tls) ?? 0)
-        mode.segmentCount = 2
+        mode.segmentCount = offerFavorites ? 3 : 2
         mode.setLabel(tr("直接連線", "Direct"), forSegment: 0)
         mode.setLabel(tr("透過 SSH", "Through SSH"), forSegment: 1)
+        if offerFavorites { mode.setLabel(tr("常用資料庫", "Favorite"), forSegment: 2) }
         mode.selectedSegment = (ssh ?? start.usesSSH) ? 1 : 0
         note(resolved)
         note(hostHint)
@@ -105,7 +127,6 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
 
         let sshTitle = label(tr("SSH 主機", "SSH Server")), sshPortTitle = label(tr("SSH 連接埠", "SSH Port")),
             keyTitle = label(tr("私鑰", "Private Key"))
-        sshLabels = [sshTitle, sshPortTitle, keyTitle]
         // The key's field makes room for its Choose button, the two as wide as the other fields.
         chooseKey.title = tr("選擇…", "Choose…")
         chooseKey.bezelStyle = .rounded
@@ -117,8 +138,21 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         keyRow.widthAnchor.constraint(equalToConstant: 300).isActive = true
         let line = NSBox()
         line.boxType = .separator
+        // A favorite: its name in a menu, what it connects to under it.
+        if favorites.isEmpty {
+            favoritePicker.addItem(withTitle: tr("還沒有常用資料庫", "No Favorite Databases Yet"))
+            favoritePicker.isEnabled = false
+        } else {
+            favoritePicker.addItems(withTitles: favorites.map(\.name))
+        }
+        favoritePicker.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        note(favoriteSummary)
+        favoriteSummary.lineBreakMode = .byTruncatingMiddle
+        favoriteSummary.widthAnchor.constraint(equalToConstant: 300).isActive = true
         view = NSGridView(views: [
             [label(tr("連線方式", "Connect")), mode],
+            [label(tr("常用資料庫", "Favorite")), favoritePicker],
+            [NSGridCell.emptyContentView, favoriteSummary],
             [sshTitle, sshHost],
             [NSGridCell.emptyContentView, resolved],
             [sshPortTitle, sshPort],
@@ -150,15 +184,21 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         sshHost.widthAnchor.constraint(equalToConstant: 300).isActive = true
         mode.target = self
         mode.action = #selector(modeChanged(_:))
+        favoritePicker.target = self
+        favoritePicker.action = #selector(favoriteChanged(_:))
         view.column(at: 0).xPlacement = .trailing
         view.rowAlignment = .firstBaseline
         view.row(at: 0).bottomPadding = 4
         view.row(at: 2).topPadding = -4
-        view.row(at: 5).mergeCells(in: NSRange(location: 0, length: 2))
-        view.row(at: 5).topPadding = 4
-        view.row(at: 5).bottomPadding = 4
-        view.row(at: 7).topPadding = -4
-        view.row(at: 11).topPadding = -2
+        view.row(at: 4).topPadding = -4
+        view.row(at: 7).mergeCells(in: NSRange(location: 0, length: 2))
+        view.row(at: 7).topPadding = 4
+        view.row(at: 7).bottomPadding = 4
+        view.row(at: 9).topPadding = -4
+        view.row(at: 13).topPadding = -2
+        favoriteRows = (1...2).map { view.row(at: $0) }
+        sshRows = (3...7).map { view.row(at: $0) }
+        serverRows = (8..<view.numberOfRows).map { view.row(at: $0) }
         if let name {
             let field = NSTextField(string: name)
             field.placeholderString = tr("例如：正式機的訂單資料庫", "e.g. Orders on production")
@@ -168,8 +208,8 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
             view.row(at: 0).bottomPadding = 8
         }
         showResolved()
+        showFavoriteSummary()
         applyMode()
-        view.frame.size = view.fittingSize
     }
 
     /// The favorite's name as entered.
@@ -231,15 +271,31 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
 
     @objc private func modeChanged(_ sender: Any?) {
         applyMode()
-        fillSavedPassword()   // through SSH or not is another account
+        if !viaFavorite { fillSavedPassword() }   // through SSH or not is another account
         view.window?.makeFirstResponder(firstField)
     }
 
-    /// The SSH fields take part only through SSH, and the database host's hint says how it's seen.
+    @objc private func favoriteChanged(_ sender: Any?) { showFavoriteSummary() }
+
+    private func showFavoriteSummary() {
+        favoriteSummary.stringValue = favorites.isEmpty
+            ? tr("連線後可從工具列的星號按鈕加入常用資料庫", "Add one from the star button in the toolbar once connected")
+            : chosenFavoriteForSummary.map { "→ " + $0.summary } ?? " "
+    }
+
+    private var chosenFavoriteForSummary: Favorite? {
+        let index = favoritePicker.indexOfSelectedItem
+        return index >= 0 && index < favorites.count ? favorites[index] : nil
+    }
+
+    /// Each choice shows its own rows: a favorite only its picker, a direct connection no SSH
+    /// fields, SSH all of them. The database host's hint says how it's seen.
     private func applyMode() {
-        for control in [sshHost, sshPort, sshKey, chooseKey] as [NSControl] { control.isEnabled = viaSSH }
-        for label in sshLabels { label.textColor = viaSSH ? .labelColor : .tertiaryLabelColor }
-        resolved.isHidden = !viaSSH
+        for row in favoriteRows { row.isHidden = !viaFavorite }
+        for row in sshRows { row.isHidden = !viaSSH }
+        for row in serverRows { row.isHidden = viaFavorite }
+        view.frame.size = view.fittingSize
+        onResize?()
         hostHint.stringValue = viaSSH
             ? tr("從 SSH 主機看到的位址，同一台機器就是 127.0.0.1", "As the SSH server sees it: 127.0.0.1 when it’s the same machine")
             : tr("伺服器的名稱或 IP 位址", "The server’s name or IP address")
