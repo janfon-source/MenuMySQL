@@ -4,8 +4,9 @@ import AppKit
 /// to one of the favorites. Through SSH, the SSH server comes first (picked from ~/.ssh/config,
 /// which fills in its port and key), then the database server as that machine sees it, usually
 /// 127.0.0.1; then the account, password, database and TLS. A direct connection shows no SSH
-/// fields, and a favorite only its picker; the dialog holding the form resizes to suit.
-final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
+/// fields, and a favorite only their list, where a click connects; the dialog holding the form
+/// resizes to suit.
+final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     let view: NSGridView
     private let mode = NSSegmentedControl()
     private let sshHost = NSComboBox()
@@ -36,8 +37,9 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
     private var viaSSH: Bool { mode.selectedSegment == 1 }
     /// The third choice, offered in the connection dialog: one of the favorites.
     private var viaFavorite: Bool { mode.selectedSegment == 2 }
-    private let favoritePicker = NSPopUpButton()
-    private let favoriteSummary = NSTextField(labelWithString: "")
+    private let favoriteList = FavoriteList()
+    private let favoriteScroll = NSScrollView()
+    private let favoriteHint = NSTextField(wrappingLabelWithString: "")
     private let favorites: [Favorite]
     /// The rows each choice shows: the SSH server's, the database server's, the favorite's.
     private var sshRows: [NSGridRow] = []
@@ -45,18 +47,15 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
     private var favoriteRows: [NSGridRow] = []
     /// Called when the form changes height, for the dialog to fit it.
     var onResize: (() -> Void)?
-
-    /// Whether the choice is a favorite (picked or not: there may be none yet).
-    var choosingFavorite: Bool { viaFavorite }
-
-    /// The favorite picked, when connecting to one.
-    var chosenFavorite: Favorite? {
-        guard viaFavorite, favoritePicker.indexOfSelectedItem >= 0, favoritePicker.indexOfSelectedItem < favorites.count else { return nil }
-        return favorites[favoritePicker.indexOfSelectedItem]
-    }
+    /// Called when the choice switches to or from the favorites, which need no buttons of the dialog's.
+    var onModeChange: ((_ favorite: Bool) -> Void)?
+    /// A favorite clicked in the list, to connect to; Esc in the list; the Manage button.
+    var onChooseFavorite: ((Favorite) -> Void)?
+    var onCancel: (() -> Void)?
+    var onManageFavorites: (() -> Void)?
 
     var firstField: NSView {
-        if viaFavorite { return favoritePicker }
+        if viaFavorite { return favoriteList }
         if let nameField, nameField.stringValue.isEmpty { return nameField }
         if viaSSH, sshHost.stringValue.isEmpty { return sshHost }
         return host.stringValue.isEmpty ? host : passwordText.isEmpty ? (revealed ? plainPassword : password) : database
@@ -138,21 +137,36 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         keyRow.widthAnchor.constraint(equalToConstant: 300).isActive = true
         let line = NSBox()
         line.boxType = .separator
-        // A favorite: its name in a menu, what it connects to under it.
-        if favorites.isEmpty {
-            favoritePicker.addItem(withTitle: tr("還沒有常用資料庫", "No Favorite Databases Yet"))
-            favoritePicker.isEnabled = false
-        } else {
-            favoritePicker.addItems(withTitles: favorites.map(\.name))
-        }
-        favoritePicker.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        note(favoriteSummary)
-        favoriteSummary.lineBreakMode = .byTruncatingMiddle
-        favoriteSummary.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        // The favorites: a row each with its name and what it connects to, then Manage.
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("favorite"))
+        column.resizingMask = .autoresizingMask
+        favoriteList.addTableColumn(column)
+        favoriteList.headerView = nil
+        favoriteList.rowHeight = 36
+        favoriteList.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        favoriteScroll.documentView = favoriteList
+        favoriteScroll.hasVerticalScroller = true
+        favoriteScroll.autohidesScrollers = true
+        favoriteScroll.borderType = .bezelBorder
+        favoriteScroll.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        favoriteScroll.heightAnchor.constraint(equalToConstant: min(260, max(110, CGFloat(favorites.count) * 38 + 4))).isActive = true
+        note(favoriteHint)
+        favoriteHint.preferredMaxLayoutWidth = 300
+        let manage = NSButton(title: tr("管理常用資料庫…", "Manage Favorite Databases…"), target: nil, action: nil)
+        manage.bezelStyle = .rounded
+        manage.controlSize = .small
+        manage.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        // The dialog's own buttons are hidden while the favorites show; this one closes it.
+        let cancel = NSButton(title: tr("取消", "Cancel"), target: nil, action: nil)
+        cancel.bezelStyle = .rounded
+        cancel.controlSize = .small
+        cancel.font = manage.font
+        let favoriteButtons = NSStackView(views: [manage, NSView(), cancel])
+        favoriteButtons.widthAnchor.constraint(equalToConstant: 300).isActive = true
         view = NSGridView(views: [
             [label(tr("連線方式", "Connect")), mode],
-            [label(tr("常用資料庫", "Favorite")), favoritePicker],
-            [NSGridCell.emptyContentView, favoriteSummary],
+            [label(tr("常用資料庫", "Favorite")), favoriteScroll],
+            [NSGridCell.emptyContentView, NSStackView(views: [favoriteHint, favoriteButtons])],
             [sshTitle, sshHost],
             [NSGridCell.emptyContentView, resolved],
             [sshPortTitle, sshPort],
@@ -184,12 +198,30 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         sshHost.widthAnchor.constraint(equalToConstant: 300).isActive = true
         mode.target = self
         mode.action = #selector(modeChanged(_:))
-        favoritePicker.target = self
-        favoritePicker.action = #selector(favoriteChanged(_:))
+        favoriteList.dataSource = self
+        favoriteList.delegate = self
+        favoriteList.target = self
+        favoriteList.action = #selector(favoriteClicked(_:))
+        favoriteList.onKey = { [weak self] key in
+            guard let self else { return }
+            switch key {
+            case .choose: if self.favorites.indices.contains(self.favoriteList.selectedRow) { self.onChooseFavorite?(self.favorites[self.favoriteList.selectedRow]) }
+            case .cancel: self.onCancel?()
+            }
+        }
+        manage.target = self
+        manage.action = #selector(manageFavorites(_:))
+        cancel.target = self
+        cancel.action = #selector(cancelFavorites(_:))
         view.column(at: 0).xPlacement = .trailing
         view.rowAlignment = .firstBaseline
         view.row(at: 0).bottomPadding = 4
-        view.row(at: 2).topPadding = -4
+        view.row(at: 1).yPlacement = .top
+        if let stack = view.cell(atColumnIndex: 1, rowIndex: 2).contentView as? NSStackView {
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 6
+        }
         view.row(at: 4).topPadding = -4
         view.row(at: 7).mergeCells(in: NSRange(location: 0, length: 2))
         view.row(at: 7).topPadding = 4
@@ -208,7 +240,10 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
             view.row(at: 0).bottomPadding = 8
         }
         showResolved()
-        showFavoriteSummary()
+        favoriteHint.stringValue = favorites.isEmpty
+            ? tr("還沒有常用資料庫。連線後可用「將目前的連線加入常用資料庫…」（⌘D）加入。",
+                 "No favorite databases yet. Once connected, add one with Add This Connection to Favorites… (⌘D).")
+            : tr("點一下就連線。", "Click one to connect.")
         applyMode()
     }
 
@@ -275,18 +310,42 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         view.window?.makeFirstResponder(firstField)
     }
 
-    @objc private func favoriteChanged(_ sender: Any?) { showFavoriteSummary() }
+    // MARK: The favorites
 
-    private func showFavoriteSummary() {
-        favoriteSummary.stringValue = favorites.isEmpty
-            ? tr("連線後可從工具列的星號按鈕加入常用資料庫", "Add one from the star button in the toolbar once connected")
-            : chosenFavoriteForSummary.map { "→ " + $0.summary } ?? " "
+    func numberOfRows(in tableView: NSTableView) -> Int { favorites.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let favorite = favorites[row]
+        let icon = NSImageView(image: NSImage(systemSymbolName: favorite.location.usesSSH ? "lock.shield" : "star", accessibilityDescription: nil)!)
+        icon.contentTintColor = .secondaryLabelColor
+        let name = NSTextField(labelWithString: favorite.name)
+        name.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        let summary = NSTextField(labelWithString: favorite.summary)
+        summary.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        summary.textColor = .secondaryLabelColor
+        for label in [name, summary] {
+            label.lineBreakMode = .byTruncatingMiddle
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        let text = NSStackView(views: [name, summary])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        let row = NSStackView(views: [icon, text])
+        row.spacing = 8
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+        row.toolTip = favorite.summary
+        return row
     }
 
-    private var chosenFavoriteForSummary: Favorite? {
-        let index = favoritePicker.indexOfSelectedItem
-        return index >= 0 && index < favorites.count ? favorites[index] : nil
+    @objc private func favoriteClicked(_ sender: Any?) {
+        let row = favoriteList.clickedRow
+        guard favorites.indices.contains(row) else { return }
+        onChooseFavorite?(favorites[row])
     }
+
+    @objc private func manageFavorites(_ sender: Any?) { onManageFavorites?() }
+    @objc private func cancelFavorites(_ sender: Any?) { onCancel?() }
 
     /// Each choice shows its own rows: a favorite only its picker, a direct connection no SSH
     /// fields, SSH all of them. The database host's hint says how it's seen.
@@ -295,6 +354,7 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
         for row in sshRows { row.isHidden = !viaSSH }
         for row in serverRows { row.isHidden = viaFavorite }
         view.frame.size = view.fittingSize
+        onModeChange?(viaFavorite)
         onResize?()
         hostHint.stringValue = viaSSH
             ? tr("從 SSH 主機看到的位址，同一台機器就是 127.0.0.1", "As the SSH server sees it: 127.0.0.1 when it’s the same machine")
@@ -375,5 +435,20 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate {
     /// one. The line stays, blank, for other servers, so the form keeps its size.
     private func showResolved() {
         resolved.stringValue = hosts.first { $0.alias == sshHost.stringValue }.map { "→ " + $0.summary } ?? " "
+    }
+}
+
+/// The favorites' list, taking Return to connect to the one selected and Esc to close the dialog,
+/// whose own buttons are hidden while it shows.
+private final class FavoriteList: NSTableView {
+    enum Key { case choose, cancel }
+    var onKey: ((Key) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: onKey?(.choose)   // Return, Enter
+        case 53: onKey?(.cancel)       // Esc
+        default: super.keyDown(with: event)
+        }
     }
 }

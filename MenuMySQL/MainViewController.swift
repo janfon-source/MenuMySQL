@@ -17,11 +17,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     var database: MySQLDatabase? { active.map { sessions[$0].database } }
     private var objects: [DatabaseObject] = []
     private var selected: DatabaseObject? { sidebar.selectedRow >= 0 ? objects[sidebar.selectedRow] : nil }
-    /// The table the Data and Structure tabs were last loaded for. Reloading the table list
+    /// The table the Edit and Data tabs were last loaded for. Reloading the table list
     /// reselects the same row, which mustn't count as choosing it again and lose its filter.
     private var shown: DatabaseObject?
 
-    private enum Tab: Int { case edit, data, structure, query }
+    private enum Tab: Int { case edit, data, query }
     private var tab = Tab.data {
         didSet { showTab() }
     }
@@ -64,13 +64,12 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private var dataPane: NSStackView!
     private var filterButton: NSButton!
     private var columnsButton: NSButton!
-    /// The Structure and Edit tabs' menu of things to do to the table: optimize, export, print, AUTO_INCREMENT, empty.
+    /// The Edit tab's menu of things to do to the table: optimize, export, print, AUTO_INCREMENT, empty.
     private var tableMenuButton: NSButton!
     /// Columns left out of the Data tab, by table, for as long as the app runs. Every column
     /// shows until some are unticked.
     private var hiddenColumns: [String: Set<String>] = [:]
     private let queryGrid = Grid()
-    private let structureView = NSTextView.scrollableTextView()
     /// The Edit tab: the table's or view's editor, scrolling when the window is too short for it.
     private let designView = NSScrollView()
     private let designHolder = FlippedView()
@@ -79,7 +78,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private var designEditor: AnyObject?
     private let editorView = NSTextView.scrollableTextView()
     private var editor: NSTextView { editorView.documentView as! NSTextView }
-    private var structureText: NSTextView { structureView.documentView as! NSTextView }
     private let querySplit = NSSplitView()
     private var querySplitPlaced = false
     private let statusLabel = NSTextField(labelWithString: "")
@@ -146,8 +144,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let toolbar = NSStackView(views: [
             toolButton("network", "連線到 MySQL 或 MariaDB 伺服器，直接或透過 SSH（⌘O；⇧⌘O 直接選 SSH）",
                        "Connect to a MySQL or MariaDB Server, directly or through SSH (⌘O; ⇧⌘O for SSH)", #selector(connect(_:))),
-            toolButton("star", "常用資料庫：連線、加入目前的連線、管理", "Favorite Databases: connect, add this one, manage",
-                       #selector(showFavoritesMenu(_:))),
             toolButton("clock.arrow.circlepath", "最近的連線", "Recent Connections", #selector(showRecentMenu(_:))),
             newDatabaseButton,
             divider(),
@@ -287,7 +283,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private func makeDetail() -> NSView {
         tabs.segmentStyle = .rounded
-        tabs.segmentCount = 4
+        tabs.segmentCount = 3
         tabs.trackingMode = .selectOne
         tabs.selectedSegment = Tab.data.rawValue
         tabs.target = self
@@ -338,10 +334,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         designMessage.alignment = .center
         designMessage.textColor = .secondaryLabelColor
 
-        // Structure: columns, indexes and the CREATE statement.
-        structureText.isEditable = false
-        structureText.textContainerInset = NSSize(width: 10, height: 10)
-
         // Query: an SQL editor over its results.
         let sqlText = editor
         sqlText.delegate = self
@@ -379,7 +371,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
         emptyLabel.alignment = .center
         emptyLabel.textColor = .secondaryLabelColor
-        for view in [designView, dataPane!, structureView, querySplit, emptyLabel] {
+        for view in [designView, dataPane!, querySplit, emptyLabel] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
             let inset: CGFloat = view === emptyLabel ? 24 : 0
@@ -491,13 +483,12 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         tabs.setLabel(tr("編輯", "Edit"), forSegment: Tab.edit.rawValue)
         tabs.setLabel(tr("資料", "Data"), forSegment: Tab.data.rawValue)
-        tabs.setLabel(tr("結構", "Structure"), forSegment: Tab.structure.rawValue)
         tabs.setLabel("SQL", forSegment: Tab.query.rawValue)
         updateTitle()
         updateFooter()
         filterBar.applyLanguage()
         // The structure text carries its headings in the language it was built in.
-        loadStructure()
+        loadDesign()
         showTab()
     }
 
@@ -519,7 +510,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     private func askConnection(ssh: Bool?) {
-        // Empty each time: earlier connections are a click away in the recent and favorite menus.
+        // Empty each time: earlier connections are a click away in the recent menu and the favorites' list.
         let form = ConnectionForm(start: nil, password: nil, ssh: ssh, offerFavorites: true)
         let alert = NSAlert()
         alert.messageText = ssh == true ? tr("透過 SSH 連線到 MySQL 或 MariaDB", "Connect to MySQL or MariaDB through SSH")
@@ -531,13 +522,22 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         alert.addButton(withTitle: tr("取消", "Cancel"))
         alert.window.initialFirstResponder = form.firstField
         // The form grows and shrinks as the choice changes (no SSH fields for a direct
-        // connection, just a menu for a favorite); the dialog follows.
+        // connection, just the list for a favorite); the dialog follows.
         form.onResize = { [weak alert] in alert?.layout() }
-        guard keepingPopoverOpen({ alert.runModal() }) == .alertFirstButtonReturn else { return }
-        if form.choosingFavorite {
-            if let favorite = form.chosenFavorite { open(favorite.location) }   // its saved password, or asked for
-            return
+        // The favorites need no Connect or Cancel: a click on one connects, Esc closes.
+        form.onModeChange = { [weak alert] favorite in alert?.buttons.forEach { $0.isHidden = favorite } }
+        var favorite: Favorite?, manage = false
+        func finish(_ response: NSApplication.ModalResponse) {
+            NSApp.stopModal(withCode: response)
+            alert.window.orderOut(nil)
         }
+        form.onChooseFavorite = { favorite = $0; finish(.alertFirstButtonReturn) }
+        form.onCancel = { finish(.alertSecondButtonReturn) }
+        form.onManageFavorites = { manage = true; finish(.alertSecondButtonReturn) }
+        let response = keepingPopoverOpen({ alert.runModal() })
+        if manage { return manageFavorites(nil) }
+        if let favorite { open(favorite.location); return }   // its saved password, or asked for
+        guard response == .alertFirstButtonReturn else { return }
         let location: ServerLocation
         switch form.location {
         case .success(let entered): location = entered
@@ -709,7 +709,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         updateColumnsButton()
         updateTableButtons()
         loadPage()
-        loadStructure()
+        loadDesign()
         editor.string = session.sql
         matchingSQL = session.matchingSQL
         ranMatchingSQL = session.ranMatchingSQL
@@ -1013,36 +1013,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     // MARK: Favorite databases
 
-    /// The favorites, to connect to one; then adding the connection in use, and managing them.
-    @objc func showFavoritesMenu(_ sender: NSButton) {
-        let menu = NSMenu()
-        let favorites = Favorites.all
-        for favorite in favorites {
-            let item = NSMenuItem(title: favorite.name, action: #selector(openFavorite(_:)), keyEquivalent: "")
-            item.toolTip = favorite.summary
-            item.representedObject = favorite.id.uuidString
-            item.target = self
-            item.image = NSImage(systemSymbolName: favorite.location.usesSSH ? "lock.shield" : "star", accessibilityDescription: nil)
-            if let database, favorite.location.key == database.server.key { item.state = .on }
-            menu.addItem(item)
-        }
-        if favorites.isEmpty {
-            let none = NSMenuItem(title: tr("還沒有常用資料庫", "No Favorite Databases Yet"), action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            menu.addItem(none)
-        }
-        menu.addItem(.separator())
-        add(menu, tr("將目前的連線加入常用資料庫…", "Add This Connection to Favorites…"), #selector(addToFavorites(_:)), key: "d")
-        add(menu, tr("管理常用資料庫…", "Manage Favorite Databases…"), #selector(manageFavorites(_:)))
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
-    }
-
-    @objc private func openFavorite(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
-              let favorite = Favorites.all.first(where: { $0.id.uuidString == id }) else { return }
-        open(favorite.location)
-    }
-
     /// Keeps the connection in use, with the database open now, under a name.
     @objc func addToFavorites(_ sender: Any?) {
         guard let database else { return NSSound.beep() }
@@ -1058,8 +1028,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         field.stringValue = Favorites.suggestedName(for: location)
         let alert = NSAlert()
         alert.messageText = tr("加入常用資料庫", "Add to Favorites")
-        alert.informativeText = tr("儲存 \(database.location) 的連線資訊，之後從星號選單一鍵連線。名稱：",
-                                   "Saves how to reach \(database.location), to connect from the star menu later. Name:")
+        alert.informativeText = tr("儲存 \(database.location) 的連線資訊，之後在連線視窗的「常用資料庫」點一下就能連線。名稱：",
+                                   "Saves how to reach \(database.location), to connect from the connection dialog’s Favorite choice later. Name:")
         alert.accessoryView = field
         alert.addButton(withTitle: tr("加入", "Add"))
         alert.addButton(withTitle: tr("取消", "Cancel"))
@@ -1173,7 +1143,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         updateColumnsButton()
         loadPage()
         matchQueryToData()   // after the page, whose columns the SELECT may list
-        loadStructure()
+        loadDesign()
         showTab()
     }
 
@@ -1234,7 +1204,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     /// Deletes every row of the table right-clicked in the list, keeping the table itself.
     @objc func emptyTable(_ sender: Any?) { empty(actedOn) }
 
-    /// The Structure and Edit tabs' menu acts on the table showing.
+    /// The Edit tab's menu acts on the table showing.
     @objc func emptySelectedTable(_ sender: Any?) { empty(selected) }
 
     private func empty(_ object: DatabaseObject?) {
@@ -1253,11 +1223,10 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         guard selected?.name == object.name else { return }
         loadPage()
-        if tab == .structure { refreshStructure() }
     }
 
     /// Runs the editor's SQL, then shows the table as it is now at once: the Data tab's columns
-    /// in their new order, the filter's columns, the Structure and Edit tabs and the SQL tab's
+    /// in their new order, the filter's columns, the Edit tab and the SQL tab's
     /// SELECT. From the Edit tab, a statement the server refused leaves the editor as it was, to fix.
     private func changeSchema(_ sql: String, thenSelect name: String, keepingEditsOnFailure: Bool = false) {
         guard let database else { return }
@@ -1273,8 +1242,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             sidebar.scrollRowToVisible(row)
         }
         refresh(nil)
-        // Read now rather than when the tab is next shown (refresh read it if it's showing).
-        if structureStale { refreshStructure() }
         matchQueryToData()
     }
 
@@ -1568,119 +1535,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         ])
     }
 
-    // MARK: - Structure tab
-
-    /// Whether the Structure tab shows an older table, or older facts, than it should. It's read
-    /// again when it next shows, so choosing tables on the Data tab doesn't wait for it.
-    private var structureStale = true
-
-    /// `keepingDesign` after the table menu's actions, which leave the design (and the Edit tab's
-    /// changes) as they were.
-    private func loadStructure(keepingDesign: Bool = false) {
-        structureStale = true
-        if isViewLoaded, tab == .structure { refreshStructure() }
-        guard !keepingDesign else { return }
+    /// Marks the Edit tab's editor out of date, after the table or its design may have changed;
+    /// made again at once if it's showing.
+    private func loadDesign() {
         designStale = true
         if isViewLoaded, tab == .edit { refreshDesign() }
-    }
-
-    /// What the Structure tab shows of a table or view.
-    private struct StructureInfo {
-        var facts: TableFacts?
-        var rows = 0
-        var columns: [Column] = []
-        var indexes: [Index]?
-        var create: String?
-    }
-
-    /// Reads the structure off the main thread, and shows it.
-    private func refreshStructure() {
-        structureStale = false
-        guard database != nil, let object = selected else {
-            structureText.textStorage?.setAttributedString(NSAttributedString())
-            return
-        }
-        perform(tr("正在讀取結構…", "Loading the structure…"), cancellable: true) { database in
-            var info = StructureInfo()
-            if object.kind == .table {
-                info.facts = try database.facts(of: object.name)
-                info.rows = try database.rowCount(of: object.name)
-                info.indexes = try database.indexes(of: object.name)
-            }
-            info.columns = try database.columns(of: object.name)
-            info.create = try database.createStatement(of: object)
-            return info
-        } then: { [weak self] result in
-            guard let self, self.selected == object else { return }
-            self.showStructure(result)
-        }
-    }
-
-    private func showStructure(_ result: Result<StructureInfo, Error>) {
-        let text = NSMutableAttributedString()
-        let body: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-                                                   .foregroundColor: NSColor.labelColor]
-        func heading(_ title: String) {
-            if text.length > 0 { text.append(NSAttributedString(string: "\n", attributes: body)) }
-            text.append(NSAttributedString(string: title + "\n", attributes: [
-                .font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.labelColor]))
-        }
-        func line(_ s: String, color: NSColor = .labelColor) {
-            var attrs = body
-            attrs[.foregroundColor] = color
-            text.append(NSAttributedString(string: s + "\n", attributes: attrs))
-        }
-        let font = body[.font] as! NSFont
-        switch result {
-        case .failure(let error):
-            line(MySQLDatabase.wasCancelled(error) ? tr("已取消讀取", "Loading cancelled") : error.localizedDescription, color: .systemRed)
-        case .success(let info):
-            if let facts = info.facts {
-                heading(tr("資料表資訊", "Table Info"))
-                let rows = SchemaDocument.factRows(facts, rows: info.rows)
-                let paragraph = NSMutableParagraphStyle()
-                paragraph.tabStops = [NSTextTab(textAlignment: .left, location: (rows.map {
-                    ($0[0] as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 16)]
-                for row in rows {
-                    let entry = NSMutableAttributedString(string: row[0] + "\t", attributes: [
-                        .font: font, .paragraphStyle: paragraph, .foregroundColor: NSColor.secondaryLabelColor])
-                    entry.append(NSAttributedString(string: row[1] + "\n", attributes: [
-                        .font: font, .paragraphStyle: paragraph, .foregroundColor: NSColor.labelColor]))
-                    text.append(entry)
-                }
-            }
-            heading(tr("欄位", "Columns"))
-            let rows = [[tr("名稱", "Name"), tr("類型", "Type"), tr("非空", "Not Null"), tr("預設值", "Default"), tr("主鍵", "Key"), tr("其他", "Extra")]]
-                + info.columns.map { [$0.name, $0.type, $0.notNull ? "✓" : "", $0.defaultValue ?? "", $0.primaryKey > 0 ? "\($0.primaryKey)" : "",
-                                      ([$0.autoIncrement ? "AUTO_INCREMENT" : nil, $0.onUpdate, $0.generated].compactMap { $0 }
-                                       + ($0.comment.isEmpty ? [] : ["-- " + $0.comment])).joined(separator: " ")] }
-            // Tab stops at each column's widest text keep the columns lined up, Chinese included.
-            var stop: CGFloat = 0
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.tabStops = (0..<5).map { i in
-                stop += (rows.map { ($0[i] as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 16
-                return NSTextTab(textAlignment: .left, location: stop)
-            }
-            for (n, row) in rows.enumerated() {
-                text.append(NSAttributedString(string: row.joined(separator: "\t") + "\n", attributes: [
-                    .font: font, .paragraphStyle: paragraph,
-                    .foregroundColor: n == 0 ? NSColor.secondaryLabelColor : NSColor.labelColor]))
-            }
-            if let indexes = info.indexes {
-                heading(tr("索引", "Indexes"))
-                if indexes.isEmpty { line(tr("（沒有）", "(none)"), color: .secondaryLabelColor) }
-                for index in indexes {
-                    line("\(index.name)\(index.unique ? " UNIQUE" : "")  (\(index.columns.joined(separator: ", ")))")
-                }
-            }
-            if let sql = info.create {
-                heading(tr("建立語句", "CREATE Statement"))
-                let statement = NSMutableAttributedString(string: sql + "\n", attributes: body)
-                SyntaxHighlighter.highlight(statement, language: "sql")
-                text.append(statement)
-            }
-        }
-        structureText.textStorage?.setAttributedString(text)
     }
 
     // MARK: - Working off the main thread
@@ -1746,7 +1605,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     @objc func showTableMenu(_ sender: Any?) {
         guard let database, let object = selected else { return NSSound.beep() }
-        if tab != .structure, tab != .edit { tab = .structure }
+        if tab != .edit { tab = .edit }
         let menu = NSMenu()
         menu.autoenablesItems = false
         func item(_ zh: String, _ en: String, _ action: Selector, enabled: Bool = true) {
@@ -1759,6 +1618,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             item("分析資料表（ANALYZE）", "Analyze Table (ANALYZE)", #selector(analyzeTable(_:)))
             menu.addItem(.separator())
         }
+        item("顯示建立語句（SQL）…", "Show CREATE Statement (SQL)…", #selector(showCreateStatement(_:)))
+        item("複製建立語句（SQL）", "Copy CREATE Statement (SQL)", #selector(copyCreateStatement(_:)))
+        menu.addItem(.separator())
         item("匯出 Markdown…", "Export Markdown…", #selector(exportTableMarkdown(_:)))
         item("列印…", "Print…", #selector(printTable(_:)))
         if object.kind == .table {
@@ -1805,7 +1667,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                 // Each line is "status OK", a note (InnoDB recreates instead of optimizing), or a problem.
                 let notes = result.rows.filter { $0.count >= 4 }.map { "\($0[2].display): \($0[3].display)" }
                 let failed = result.rows.contains { $0.count >= 4 && $0[2].display.lowercased() == "error" }
-                self.loadStructure(keepingDesign: true)
                 var text = notes.joined(separator: "\n")
                 if verb == "OPTIMIZE", let before, let after {
                     text = tr("大小：", "Size: ") + "\(TableFacts.bytes(before)) → \(TableFacts.bytes(after))\n\n" + text
@@ -1850,6 +1711,56 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     /// Prints the table's document, laid out as the structure document prints.
+    /// The table's or view's CREATE statement as the server gives it; nil, with the error shown, if it can't.
+    private func createStatementOfSelected() -> String? {
+        guard let database, let object = selected else { return nil }
+        do {
+            if let sql = try database.createStatement(of: object) { return sql + ";" }
+            NSSound.beep()
+        } catch {
+            showError(tr("無法讀取建立語句", "Couldn’t read the CREATE statement"), error)
+        }
+        return nil
+    }
+
+    /// Shows the CREATE statement, syntax-colored and selectable, with a button to copy it.
+    @objc func showCreateStatement(_ sender: Any?) {
+        guard let object = selected, let sql = createStatementOfSelected() else { return }
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 560, height: 320)
+        scroll.borderType = .bezelBorder
+        scroll.hasHorizontalScroller = true
+        let text = scroll.documentView as! NSTextView
+        text.isEditable = false
+        text.textContainerInset = NSSize(width: 6, height: 6)
+        // Long lines scroll sideways rather than wrap, as the statement is laid out.
+        text.isHorizontallyResizable = true
+        text.textContainer?.widthTracksTextView = false
+        text.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        let attributed = NSMutableAttributedString(string: sql, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.labelColor])
+        SyntaxHighlighter.highlight(attributed, language: "sql")
+        text.textStorage?.setAttributedString(attributed)
+        let alert = NSAlert()
+        alert.messageText = object.kind == .view ? tr("視圖「\(object.name)」的建立語句", "CREATE Statement of the View “\(object.name)”")
+                                                 : tr("資料表「\(object.name)」的建立語句", "CREATE Statement of the Table “\(object.name)”")
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: tr("關閉", "Close"))
+        alert.addButton(withTitle: tr("複製", "Copy"))
+        if keepingPopoverOpen({ alert.runModal() }) == .alertSecondButtonReturn { copyToPasteboard(sql) }
+    }
+
+    @objc func copyCreateStatement(_ sender: Any?) {
+        guard let sql = createStatementOfSelected() else { return }
+        copyToPasteboard(sql)
+    }
+
+    private func copyToPasteboard(_ sql: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(sql, forType: .string)
+        showNotice(tr("已複製建立語句", "CREATE statement copied"))
+    }
+
     @objc func printTable(_ sender: Any?) {
         tableDocument(tr("無法列印", "Couldn’t print")) { [weak self] markdown, object, database in
             self?.printTableDocument(markdown, of: object, in: database)
@@ -1877,7 +1788,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             alert.addButton(withTitle: tr("取消", "Cancel"))
             guard keepingPopoverOpen({ alert.runModal() }) == .alertFirstButtonReturn else { return }
             let now = try database.setAutoIncrement(of: object.name, to: next)
-            loadStructure(keepingDesign: true)
             inform(tr("已重設自動遞增值", "AUTO_INCREMENT reset"),
                    tr("下一個自動遞增值：\(now.map(String.init) ?? "—")", "Next AUTO_INCREMENT: \(now.map(String.init) ?? "—")"))
         } catch {
@@ -1907,7 +1817,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                     continue
                 }
                 let now = try database.setAutoIncrement(of: object.name, to: value)
-                loadStructure(keepingDesign: true)
                 inform(tr("已設定自動遞增值", "AUTO_INCREMENT set"),
                        tr("下一個自動遞增值：\(now.map(String.init) ?? "—")", "Next AUTO_INCREMENT: \(now.map(String.init) ?? "—")"))
                 return
@@ -1979,7 +1888,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             if Self.mayChange(sql) {
                 self.reloadObjects()
                 self.loadPage()
-                self.loadStructure()
+                self.loadDesign()
             }
         }
     }
@@ -2022,7 +1931,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     @objc func showEditTab(_ sender: Any?) { tab = .edit }
     @objc func showDataTab(_ sender: Any?) { tab = .data }
-    @objc func showStructureTab(_ sender: Any?) { tab = .structure }
     @objc func showQueryTab(_ sender: Any?) { tab = .query }
 
     private func showTab() {
@@ -2034,11 +1942,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         dataPane.isHidden = tab != .data || !hasTable
         filterButton.isHidden = dataPane.isHidden
         columnsButton.isHidden = dataPane.isHidden
-        structureView.isHidden = tab != .structure || !hasTable
-        tableMenuButton.isHidden = structureView.isHidden && designView.isHidden
-        if !structureView.isHidden, structureStale { refreshStructure() }
+        tableMenuButton.isHidden = designView.isHidden
         querySplit.isHidden = tab != .query || database == nil
-        emptyLabel.isHidden = !(designView.isHidden && dataPane.isHidden && structureView.isHidden && querySplit.isHidden)
+        emptyLabel.isHidden = !(designView.isHidden && dataPane.isHidden && querySplit.isHidden)
         emptyLabel.stringValue = database == nil
             ? tr("按工具列的地球按鈕連線到 MySQL 或 MariaDB 伺服器，可以直接連線或透過 SSH（⌘O），或從時鐘按鈕選一個最近的連線。",
                  "Connect to a MySQL or MariaDB server, directly or through SSH, with the globe button (⌘O), or pick a recent connection from the clock button.")
@@ -2112,7 +2018,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                 + (dataGrid.editable || selected?.kind == .view ? "" : tr("（唯讀）", " (read-only)"))
             statusLabel.textColor = .secondaryLabelColor
         } else {
-            statusLabel.stringValue = ""
+            statusLabel.stringValue = notice ?? ""   // a word on what just happened, on any tab
+            statusLabel.textColor = .secondaryLabelColor
         }
     }
 
@@ -2125,7 +2032,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         filterBar.update(columns: selectedColumns)
         updateFilterButton()
         loadPage()
-        loadStructure()
+        loadDesign()
     }
 
     /// Shows where the database is and how big, and lets it be compacted.
@@ -2629,7 +2536,7 @@ extension MainViewController: NSMenuItemValidation {
             return sessions.count > 1
         case #selector(deleteDatabase(_:)):
             return database?.current != nil
-        case #selector(showEditTab(_:)), #selector(editTable(_:)), #selector(showDataTab(_:)), #selector(showStructureTab(_:)), #selector(toggleFilter(_:)), #selector(showColumnsMenu(_:)):
+        case #selector(showEditTab(_:)), #selector(editTable(_:)), #selector(showDataTab(_:)), #selector(toggleFilter(_:)), #selector(showColumnsMenu(_:)):
             return selected != nil
         case #selector(toggleShowInDock(_:)):
             return !Presence.showInDock || Presence.showInMenuBar

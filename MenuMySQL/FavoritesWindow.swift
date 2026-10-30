@@ -64,7 +64,7 @@ final class FavoritesWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, 
         table.allowsMultipleSelection = false
         table.target = self
         table.doubleAction = #selector(connect(_:))
-        // Rows are dragged into the order the star menu lists them in.
+        // Rows are dragged into the order the connection dialog lists them in.
         table.registerForDraggedTypes([Self.rowType])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.draggingDestinationFeedbackStyle = .gap

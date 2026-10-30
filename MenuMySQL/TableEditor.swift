@@ -28,6 +28,12 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var removeButton: NSButton!
     private var upButton: NSButton!
     private var downButton: NSButton!
+    private var fieldsButton: NSButton!
+
+    /// The grid's columns left out (its fields: type, length, key…), kept between editors. The
+    /// widths are kept by the grid itself.
+    private static let hiddenKey = "menumysql.tableEditor.hidden"
+    private static let columnsKey = "menumysql.tableEditor.columns"
 
     /// The SQL to run, once the window closes with Save.
     private(set) var sql: String?
@@ -50,6 +56,8 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             case .comment: return tr("註解", "Comment")
             }
         }
+        /// Every field but the handle and the name can be left out of the grid.
+        var hideable: Bool { self != .handle && self != .name }
         var width: CGFloat {
             switch self {
             case .handle: return 22
@@ -123,12 +131,22 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             column.title = field.title
             column.width = field.width
             column.minWidth = field.width * 0.6
+            column.resizingMask = .userResizingMask   // dragged wider or narrower at the header
             if field == .handle {
                 column.minWidth = field.width
                 column.maxWidth = field.width
+                column.resizingMask = []
                 column.headerToolTip = tr("拖曳這裡可以調整欄位順序", "Drag here to reorder the columns")
             }
             table.addTableColumn(column)
+        }
+        table.allowsColumnReordering = false
+        // The widths dragged are kept for the next editor; then the fields left out.
+        table.autosaveName = Self.columnsKey
+        table.autosaveTableColumns = true
+        let hidden = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? [])
+        for column in table.tableColumns {
+            column.isHidden = Field(rawValue: column.identifier.rawValue).map { $0.hideable && hidden.contains($0.rawValue) } ?? false
         }
         table.dataSource = self
         table.delegate = self
@@ -142,6 +160,8 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let tableScroll = NSScrollView()
         tableScroll.documentView = table
         tableScroll.hasVerticalScroller = true
+        tableScroll.hasHorizontalScroller = true   // once the columns are dragged wider than the grid
+        tableScroll.autohidesScrollers = true
         tableScroll.borderType = .bezelBorder
 
         func button(_ symbol: String, _ zh: String, _ en: String, _ action: Selector) -> NSButton {
@@ -154,8 +174,9 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         removeButton = button("minus", "刪除欄位", "Remove Column", #selector(removeColumn(_:)))
         upButton = button("arrow.up", "上移", "Move Up", #selector(moveUp(_:)))
         downButton = button("arrow.down", "下移", "Move Down", #selector(moveDown(_:)))
+        fieldsButton = button("checklist", "選擇要顯示的欄位", "Choose the Fields to Show", #selector(showFieldsMenu(_:)))
         let columnButtons = NSStackView(views: [button("plus", "新增欄位", "Add Column", #selector(addColumn(_:))),
-                                                removeButton, upButton, downButton, NSView()])
+                                                removeButton, upButton, downButton, NSView(), fieldsButton])
         columnButtons.spacing = 4
 
         // The indexes: the key and single-column unique ones are the checkboxes above.
@@ -347,6 +368,54 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         default: break
         }
         update()
+    }
+
+    /// A default typed as plain text gets its quotes once the field is left, as the SQL will
+    /// have it; numbers, NULL, CURRENT_TIMESTAMP, expressions and quoted text stay as typed.
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, field.identifier?.rawValue == Field.defaultValue.rawValue else { return }
+        let row = table.row(for: field)
+        guard columns.indices.contains(row), columns[row].generated == nil else { return }
+        let value = field.stringValue.trimmingCharacters(in: .whitespaces)
+        let quoted = value.isEmpty ? "" : TableDesign.defaultSQL(value)
+        guard quoted != field.stringValue else { return }
+        field.stringValue = quoted
+        columns[row].defaultValue = quoted
+        update()
+    }
+
+    // MARK: Fields to show
+
+    /// Ticks for the grid's fields, staying open while they're ticked; the name always shows.
+    @objc private func showFieldsMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        let font = NSFont.menuFont(ofSize: 0)
+        let fields = Field.allCases.filter { $0 != .handle }
+        let width = max(160, (fields.map { ($0.title as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 60)
+        for field in fields {
+            let box = NSButton(checkboxWithTitle: field.title, target: self, action: #selector(toggleField(_:)))
+            box.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
+            box.state = table.tableColumn(withIdentifier: box.identifier!)?.isHidden == true ? .off : .on
+            box.isEnabled = field.hideable
+            box.font = font
+            box.frame = NSRect(x: 14, y: 2, width: width - 20, height: 20)
+            let holder = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+            holder.addSubview(box)
+            let item = NSMenuItem()
+            item.view = holder
+            menu.addItem(item)
+        }
+        menu.allowsContextMenuPlugIns = false
+        // Its right edge under the button's, so it opens into the editor rather than past it.
+        menu.popUp(positioning: nil, at: NSPoint(x: sender.bounds.width - width, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func toggleField(_ sender: NSButton) {
+        guard let id = sender.identifier, let column = table.tableColumn(withIdentifier: id) else { return }
+        view.window?.makeFirstResponder(nil)   // the text typed so far counts
+        column.isHidden = sender.state == .off
+        let hidden = table.tableColumns.filter(\.isHidden).map(\.identifier.rawValue)
+        UserDefaults.standard.set(hidden, forKey: Self.hiddenKey)
     }
 
     func comboBoxSelectionDidChange(_ notification: Notification) {
