@@ -66,8 +66,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private var filterButton: NSButton!
     /// In the toolbar: hides the tables and views on the left, or shows them again.
     private var sidebarButton: NSButton!
-    /// At the right of the tab bar, while the Edit tab shows a table's editor: its column buttons.
-    private let designTools = NSStackView()
     private var sidebarWidth: CGFloat = 190
     private var columnsButton: NSButton!
     /// The Edit tab's menu of things to do to the table: optimize, export, print, AUTO_INCREMENT, empty.
@@ -418,9 +416,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         columnsButton = toolButton("checklist", "選擇要顯示的欄位（⌥⌘K）", "Choose the Columns to Show (⌥⌘K)", #selector(showColumnsMenu(_:)))
         tableMenuButton = toolButton("gearshape", "資料表功能：最佳化、分析、匯出、列印、自動遞增值、清空",
                                      "Table Actions: optimize, analyze, export, print, AUTO_INCREMENT, empty", #selector(showTableMenu(_:)))
-        designTools.spacing = 4
-        let tabBar = NSStackView(views: [tabs, tabSpacer, designTools, columnsButton, filterButton, tableMenuButton])
-        tabBar.setCustomSpacing(12, after: designTools)
+        let tabBar = NSStackView(views: [tabs, tabSpacer, columnsButton, filterButton, tableMenuButton])
         tabBar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         tabBar.setHuggingPriority(.required, for: .vertical)   // its own height; the content takes the rest
         let detail = NSStackView(views: [tabBar, content])
@@ -1536,7 +1532,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         designStale = false
         designDiscarded = false
         designHolder.subviews.forEach { $0.removeFromSuperview() }
-        designTools.arrangedSubviews.forEach { $0.removeFromSuperview() }
         designEditor = nil
         guard let database, let object = selected else { return }
         let content: NSView
@@ -1557,7 +1552,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                                          columnsOf: referencedColumns, onSave: onSave)
                 designEditor = editor
                 content = editor.view
-                if let tools = editor.tools { designTools.addArrangedSubview(tools) }
             }
         } catch {
             designMessage.stringValue = error.localizedDescription
@@ -1982,7 +1976,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         filterButton.isHidden = dataPane.isHidden
         columnsButton.isHidden = dataPane.isHidden
         tableMenuButton.isHidden = designView.isHidden
-        designTools.isHidden = designView.isHidden
         querySplit.isHidden = tab != .query || database == nil
         emptyLabel.isHidden = !(designView.isHidden && dataPane.isHidden && querySplit.isHidden)
         emptyLabel.stringValue = database == nil
