@@ -273,10 +273,15 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         indexHint.lineBreakMode = .byTruncatingTail
         indexHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let indexHeader = NSStackView(views: [indexTitle, indexHint])
-        indexHeader.alignment = .firstBaseline
+        indexHeader.alignment = .centerY
         removeIndexButton = button("minus", "刪除索引", "Remove Index", #selector(removeIndex(_:)))
-        let indexButtons = NSStackView(views: [button("plus", "新增索引", "Add Index", #selector(addIndex(_:))), removeIndexButton, NSView()])
+        // Adding and removing at the right end of the heading.
+        let indexButtons = NSStackView(views: [button("plus", "新增索引", "Add Index", #selector(addIndex(_:))), removeIndexButton])
         indexButtons.spacing = 4
+        let indexSpacer = NSView()
+        indexSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        indexHeader.addArrangedSubview(indexSpacer)
+        indexHeader.addArrangedSubview(indexButtons)
 
         // The foreign keys.
         for field in KeyField.allCases {
@@ -307,10 +312,14 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         keyHint.lineBreakMode = .byTruncatingTail
         keyHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let keyHeader = NSStackView(views: [keyTitle, keyHint])
-        keyHeader.alignment = .firstBaseline
+        keyHeader.alignment = .centerY
         removeKeyButton = button("minus", "刪除外鍵", "Remove Foreign Key", #selector(removeForeignKey(_:)))
-        let keyButtons = NSStackView(views: [button("plus", "新增外鍵", "Add Foreign Key", #selector(addForeignKey(_:))), removeKeyButton, NSView()])
+        let keyButtons = NSStackView(views: [button("plus", "新增外鍵", "Add Foreign Key", #selector(addForeignKey(_:))), removeKeyButton])
         keyButtons.spacing = 4
+        let keySpacer = NSView()
+        keySpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        keyHeader.addArrangedSubview(keySpacer)
+        keyHeader.addArrangedSubview(keyButtons)
 
         message.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         previewText.isEditable = false
@@ -330,10 +339,10 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         sqlButton.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil)
         sqlButton.imagePosition = .imageLeading
         sqlButton.toolTip = tr("顯示儲存時將執行的 SQL", "Show the SQL that Save will run")
-        let actions = NSStackView(views: [sqlButton, NSView(), cancelButton, saveButton])
+        let actions = NSStackView(views: [NSView(), sqlButton, cancelButton, saveButton])
 
-        let stack = NSStackView(views: [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll, indexButtons,
-                                        keyHeader, keyScroll, keyButtons, message, actions])
+        let stack = NSStackView(views: [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll,
+                                        keyHeader, keyScroll, message, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -343,8 +352,8 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         stack.setCustomSpacing(14, after: inTab ? tableScroll : columnButtons)
-        stack.setCustomSpacing(14, after: indexButtons)
-        for view in [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll, indexButtons, keyHeader, keyScroll, keyButtons, message, actions] {
+        stack.setCustomSpacing(14, after: indexScroll)
+        for view in [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll, keyHeader, keyScroll, message, actions] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset).isActive = true
         }
         tableScroll.setContentHuggingPriority(.init(1), for: .vertical)
