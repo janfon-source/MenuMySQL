@@ -34,9 +34,11 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate, N
     /// a password saved for one account is never sent to another (or typed onto the end of).
     private var passwordAccount: String?
 
-    private var viaSSH: Bool { mode.selectedSegment == 1 }
-    /// The third choice, offered in the connection dialog: one of the favorites.
-    private var viaFavorite: Bool { mode.selectedSegment == 2 }
+    private var viaSSH: Bool { mode.selectedSegment == directSegment + 1 }
+    /// The first choice, offered in the connection dialog: one of the favorites.
+    private var viaFavorite: Bool { directSegment == 1 && mode.selectedSegment == 0 }
+    /// Where Direct is among the choices: first, or after Favorite when favorites are offered.
+    private var directSegment: Int { mode.segmentCount == 3 ? 1 : 0 }
     private let favoriteList = FavoriteList()
     private let favoriteScroll = NSScrollView()
     private let favoriteHint = NSTextField(wrappingLabelWithString: "")
@@ -116,10 +118,12 @@ final class ConnectionForm: NSObject, NSComboBoxDelegate, NSTextFieldDelegate, N
                                   tr("一定要使用", "Required"), tr("不使用", "Off")])
         tls.selectItem(at: MySQLWire.TLSMode.allCases.firstIndex(of: start.tls) ?? 0)
         mode.segmentCount = offerFavorites ? 3 : 2
-        mode.setLabel(tr("直接連線", "Direct"), forSegment: 0)
-        mode.setLabel(tr("透過 SSH", "Through SSH"), forSegment: 1)
-        if offerFavorites { mode.setLabel(tr("常用資料庫", "Favorite"), forSegment: 2) }
-        mode.selectedSegment = (ssh ?? start.usesSSH) ? 1 : 0
+        let direct = offerFavorites ? 1 : 0   // Favorite comes first
+        if offerFavorites { mode.setLabel(tr("常用資料庫", "Favorite"), forSegment: 0) }
+        mode.setLabel(tr("直接連線", "Direct"), forSegment: direct)
+        mode.setLabel(tr("透過 SSH", "Through SSH"), forSegment: direct + 1)
+        // Asked for no particular way, with favorites to offer, the list of them shows first.
+        mode.selectedSegment = ssh == nil && !favorites.isEmpty ? 0 : direct + ((ssh ?? start.usesSSH) ? 1 : 0)
         note(resolved)
         note(hostHint)
         hostHint.preferredMaxLayoutWidth = 300
