@@ -44,6 +44,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         static let size = "menumysql.size"
         static let pinned = "menumysql.pinned"
         static let recent = "menumysql.recent"
+        static let sidebarHidden = "menumysql.sidebarHidden"
     }
 
     static let defaultSize = NSSize(width: 780, height: 540)
@@ -63,6 +64,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let filterBar = FilterBar()
     private var dataPane: NSStackView!
     private var filterButton: NSButton!
+    /// Before the Edit, Data and SQL tabs: hides the tables and views on the left, or shows them again.
+    private var sidebarButton: NSButton!
+    private var sidebarWidth: CGFloat = 190
     private var columnsButton: NSButton!
     /// The Edit tab's menu of things to do to the table: optimize, export, print, AUTO_INCREMENT, empty.
     private var tableMenuButton: NSButton!
@@ -228,7 +232,25 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         updateTableButtons()   // nothing open yet: the database's buttons start off
         updateRunButton()
         reloadDatabases()
-        body.setPosition(190, ofDividerAt: 0)
+        body.setPosition(sidebarWidth, ofDividerAt: 0)
+        if UserDefaults.standard.bool(forKey: Keys.sidebarHidden) { setSidebarHidden(true) }
+    }
+
+    @objc func toggleSidebar(_ sender: Any?) {
+        setSidebarHidden(!bodySplit.arrangedSubviews[0].isHidden)
+    }
+
+    /// Hides the list of tables and views, giving its room to the tabs, or shows it again as wide as it was.
+    private func setSidebarHidden(_ hidden: Bool) {
+        let pane = bodySplit.arrangedSubviews[0]
+        guard pane.isHidden != hidden else { return }
+        if hidden, pane.frame.width > 0 { sidebarWidth = pane.frame.width }
+        if hidden, view.window?.firstResponder === sidebar { view.window?.makeFirstResponder(nil) }
+        pane.isHidden = hidden
+        bodySplit.adjustSubviews()
+        if !hidden { bodySplit.setPosition(sidebarWidth, ofDividerAt: 0) }
+        UserDefaults.standard.set(hidden, forKey: Keys.sidebarHidden)
+        sidebarButton.contentTintColor = hidden ? .controlAccentColor : .secondaryLabelColor
     }
 
     private func makeSidebar() -> NSView {
@@ -391,7 +413,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         columnsButton = toolButton("checklist", "選擇要顯示的欄位（⌥⌘K）", "Choose the Columns to Show (⌥⌘K)", #selector(showColumnsMenu(_:)))
         tableMenuButton = toolButton("gearshape", "資料表功能：最佳化、分析、匯出、列印、自動遞增值、清空",
                                      "Table Actions: optimize, analyze, export, print, AUTO_INCREMENT, empty", #selector(showTableMenu(_:)))
-        let tabBar = NSStackView(views: [tabs, tabSpacer, columnsButton, filterButton, tableMenuButton])
+        sidebarButton = toolButton("sidebar.left", "隱藏或顯示資料表和視圖清單（⌃⌘S）", "Hide or Show the Tables and Views (⌃⌘S)",
+                                   #selector(toggleSidebar(_:)))
+        let tabBar = NSStackView(views: [sidebarButton, tabs, tabSpacer, columnsButton, filterButton, tableMenuButton])
         tabBar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         tabBar.setHuggingPriority(.required, for: .vertical)   // its own height; the content takes the rest
         let detail = NSStackView(views: [tabBar, content])
@@ -1159,9 +1183,16 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     @objc func newTable(_ sender: Any?) {
         guard canChangeSchema else { return NSSound.beep() }
-        let editor = TableEditor(snapshot: nil)
+        let collation = (try? database?.run("SELECT @@collation_database").rows.first?.first).flatMap { $0 == .null ? nil : $0.display }
+        let editor = TableEditor(snapshot: nil, collation: collation, tables: tableNames, columnsOf: referencedColumns)
         guard keepingPopoverOpen({ editor.run() }), let sql = editor.sql else { return }
         changeSchema(sql, thenSelect: editor.tableName)
+    }
+
+    /// The tables a foreign key can refer to, and how to read one's columns.
+    private var tableNames: [String] { objects.filter { $0.kind == .table }.map(\.name) }
+    private var referencedColumns: (String) -> [Column] {
+        { [weak self] name in (try? self?.database?.columns(of: name)) ?? [] }
     }
 
     @objc func newView(_ sender: Any?) {
@@ -1516,7 +1547,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                 designEditor = editor
                 content = editor.view
             } else {
-                let editor = TableEditor(snapshot: try TableDesign.snapshot(of: object.name, in: database), onSave: onSave)
+                let editor = TableEditor(snapshot: try TableDesign.snapshot(of: object.name, in: database), tables: tableNames,
+                                         columnsOf: referencedColumns, onSave: onSave)
                 designEditor = editor
                 content = editor.view
             }

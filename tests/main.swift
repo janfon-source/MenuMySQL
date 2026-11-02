@@ -169,6 +169,118 @@ for port in ports.isEmpty ? [23306, 13306] : ports {
         expect(try TableDesign.snapshot(of: "articles", in: db).indexes.map(\.name), ["by_author", "recent", "uq_title_writer"], "index kept on its other column")
         check(TableDesign.problem(name: "t", columns: cols, indexes: [IndexDraft(name: "x", columns: ["nope"])]) != nil, "unknown column flagged")
 
+        // UNSIGNED, ZEROFILL, binary text and generated columns.
+        expect(TableDesign.setting("ZEROFILL", true, in: "int(5)"), "int(5) UNSIGNED ZEROFILL", "zerofill brings unsigned")
+        expect(TableDesign.setting("UNSIGNED", false, in: "int(5) unsigned zerofill"), "int(5)", "no unsigned, no zerofill")
+        expect(TableDesign.setting("UNSIGNED", true, in: "int(5) zerofill"), "int(5) UNSIGNED zerofill", "unsigned before zerofill")
+        expect(TableDesign.retype("int unsigned", to: "BIGINT", length: ""), "BIGINT UNSIGNED", "unsigned kept for a number")
+        expect(TableDesign.retype("int unsigned", to: "VARCHAR", length: "20"), "VARCHAR(20)", "unsigned dropped for text")
+        expect(TableDesign.collation(binary: true, for: ColumnDraft(), tableCollation: "utf8mb4_general_ci"), "utf8mb4_bin", "binary collation")
+        expect(TableDesign.collation(binary: false, for: ColumnDraft(collation: "utf8mb4_bin"), tableCollation: "utf8mb4_general_ci"), nil, "back to the table's")
+        try TableDesign.apply(TableDesign.createSQL(name: "parts", columns: [
+            ColumnDraft(name: "id", type: "INT UNSIGNED", primaryKey: true, notNull: true, autoincrement: true),
+            ColumnDraft(name: "code", type: "VARCHAR(10)", collation: "utf8mb4_bin"),
+            ColumnDraft(name: "qty", type: "INT(6) UNSIGNED ZEROFILL"),
+            ColumnDraft(name: "price", type: "DECIMAL(10,2)", defaultValue: "0"),
+            ColumnDraft(name: "total", type: "DECIMAL(12,2)", expression: "qty * price"),
+            ColumnDraft(name: "upper_code", type: "VARCHAR(10)", expression: "upper(code)", stored: true),
+        ]), to: db)
+        try db.run("INSERT INTO parts (code, qty, price) VALUES ('a', 3, 2.5), ('A', 1, 1)")
+        expect(try db.run("SELECT COUNT(*) FROM parts WHERE code = 'a'").rows.first?.first, .integer(1), "binary compares case")
+        expect(try db.run("SELECT total, upper_code FROM parts WHERE id = 1").rows.first?.map(\.display), ["7.50", "A"], "generated values")
+        var lines = try TableDesign.snapshot(of: "parts", in: db)
+        check(TableDesign.isBinary(lines.columns[1], tableCollation: lines.collation), "binary read back")
+        check(TableDesign.has("ZEROFILL", in: lines.columns[2].type), "zerofill read back: \(lines.columns[2].type)")
+        check(lines.columns[4].expression?.replacingOccurrences(of: "`", with: "").contains("qty * price") == true, "expression read back")
+        expect(lines.columns[5].stored, true, "stored read back")
+        expect(TableDesign.alterSQL(lines, newName: "parts", columns: lines.columns).sql, "", "attributes unchanged, no SQL")
+        var attrs = lines.columns
+        attrs[1].collation = TableDesign.collation(binary: false, for: attrs[1], tableCollation: lines.collation)
+        attrs[2].type = TableDesign.setting("ZEROFILL", false, in: attrs[2].type)
+        attrs[4].expression = "qty * price * 2"
+        attrs[4].stored = true
+        try TableDesign.apply(TableDesign.alterSQL(lines, newName: "parts", columns: attrs).sql, to: db)
+        expect(try db.run("SELECT COUNT(*) FROM parts WHERE code = 'a'").rows.first?.first, .integer(2), "no longer binary")
+        expect(try db.run("SELECT total FROM parts WHERE id = 1").rows.first?.first?.display, "15.00", "changed expression")
+        // Back to VIRTUAL with an index on it, which has to be made again with the column.
+        lines = try TableDesign.snapshot(of: "parts", in: db)
+        try db.run("CREATE INDEX by_total ON parts (total, price)")
+        lines = try TableDesign.snapshot(of: "parts", in: db)
+        attrs = lines.columns
+        attrs[4].stored = false
+        try TableDesign.apply(TableDesign.alterSQL(lines, newName: "parts", columns: attrs).sql, to: db)
+        lines = try TableDesign.snapshot(of: "parts", in: db)
+        expect(lines.columns[4].stored, false, "virtual again")
+        expect(lines.columns.map(\.name), ["id", "code", "qty", "price", "total", "upper_code"], "rebuilt column in its place")
+        expect(lines.indexes.first { $0.name == "by_total" }?.columns, ["total", "price"], "index made again")
+        lines = try TableDesign.snapshot(of: "parts", in: db)
+        check(!TableDesign.has("ZEROFILL", in: lines.columns[2].type) && TableDesign.has("UNSIGNED", in: lines.columns[2].type), "zerofill off, unsigned kept")
+        check(TableDesign.problem(name: "t", columns: [ColumnDraft(name: "g", type: "INT", expression: " ")]) != nil, "empty expression flagged")
+
+        // Foreign keys: made with the table, read back, changed, followed through a rename, dropped.
+        try TableDesign.apply(TableDesign.createSQL(name: "orders", columns: [
+            ColumnDraft(name: "id", type: "INT UNSIGNED", primaryKey: true, notNull: true, autoincrement: true),
+            ColumnDraft(name: "line", type: "INT UNSIGNED"),
+            ColumnDraft(name: "parent", type: "INT UNSIGNED"),
+        ], foreignKeys: [
+            ForeignKeyDraft(name: "fk_line", columns: ["line"], table: "parts", referencedColumns: ["id"], onDelete: "CASCADE"),
+            ForeignKeyDraft(columns: ["parent"], table: "orders", referencedColumns: ["id"], onDelete: "SET NULL"),
+        ]), to: db)
+        var orders = try TableDesign.snapshot(of: "orders", in: db)
+        expect(orders.foreignKeys.count, 2, "foreign keys read back")
+        let lineKey = orders.foreignKeys.first { $0.name == "fk_line" }
+        expect(lineKey?.onDelete, "CASCADE", "ON DELETE read back")
+        expect(lineKey?.referencedColumns, ["id"], "referenced column")
+        expect(TableDesign.alterSQL(orders, newName: "orders", columns: orders.columns).sql, "", "keys unchanged, no SQL")
+        try db.run("INSERT INTO orders (line) VALUES (1), (2)")
+        try db.run("DELETE FROM parts WHERE id = 2")
+        expect(try db.rowCount(of: "orders"), 1, "cascaded delete")
+        // Renaming the columns of both keys, one of them referenced by its own table: no key clause.
+        var orderColumns = orders.columns
+        orderColumns[0].name = "order_id"
+        orderColumns[1].name = "line_id"
+        var keys = orders.foreignKeys.map { key -> ForeignKeyDraft in
+            var k = key
+            k.columns = k.columns.map { $0 == "line" ? "line_id" : $0 }
+            if k.table == "orders" { k.referencedColumns = ["order_id"] }
+            return k
+        }
+        // The index MySQL made for a key follows the column too, as the editor renames it there.
+        let keyIndexes = orders.indexes.map { d -> IndexDraft in
+            var d = d; d.columns = d.columns.map { $0 == "line" ? "line_id" : $0 }; return d
+        }
+        let keyRename = TableDesign.alterSQL(orders, newName: "orders", columns: orderColumns, indexes: keyIndexes, foreignKeys: keys).sql
+        check(!keyRename.contains("FOREIGN"), "rename leaves keys alone: \(keyRename)")
+        try TableDesign.apply(keyRename, to: db)
+        orders = try TableDesign.snapshot(of: "orders", in: db)
+        expect(orders.foreignKeys.first { $0.table == "orders" }?.referencedColumns, ["order_id"], "self reference renamed")
+        // Change one key's action and drop the other.
+        keys = orders.foreignKeys.filter { $0.name == "fk_line" }
+        keys[0].onDelete = "RESTRICT"
+        keys[0].onUpdate = "CASCADE"
+        try TableDesign.apply(TableDesign.alterSQL(orders, newName: "orders", columns: orders.columns, foreignKeys: keys).sql, to: db)
+        orders = try TableDesign.snapshot(of: "orders", in: db)
+        expect(orders.foreignKeys.map(\.name), ["fk_line"], "one key dropped")
+        expect(orders.foreignKeys.first.map { [$0.onDelete, $0.onUpdate] }, ["RESTRICT", "CASCADE"], "key changed")
+        // Moving it to another column under the same name: the index made for it moves too.
+        keys = orders.foreignKeys
+        keys[0].columns = ["parent"]
+        try TableDesign.apply(TableDesign.alterSQL(orders, newName: "orders", columns: orders.columns, foreignKeys: keys).sql, to: db)
+        orders = try TableDesign.snapshot(of: "orders", in: db)
+        expect(orders.foreignKeys.first?.columns, ["parent"], "key moved")
+        expect(orders.indexes.first { $0.name == "fk_line" }?.columns, ["parent"], "its index moved")
+        keys = orders.foreignKeys
+        keys[0].columns = ["line_id"]
+        try TableDesign.apply(TableDesign.alterSQL(orders, newName: "orders", columns: orders.columns, foreignKeys: keys).sql, to: db)
+        orders = try TableDesign.snapshot(of: "orders", in: db)
+        // Dropping a column and its key together.
+        try TableDesign.apply(TableDesign.alterSQL(orders, newName: "orders", columns: orders.columns.filter { $0.name != "line_id" },
+                                                   indexes: orders.indexes.filter { !$0.columns.contains("line_id") }, foreignKeys: []).sql, to: db)
+        expect(try TableDesign.snapshot(of: "orders", in: db).foreignKeys.count, 0, "key dropped with its column")
+        check(TableDesign.problem(name: "t", columns: orders.columns, foreignKeys: [ForeignKeyDraft(columns: ["id"], table: "x")]) != nil,
+              "unpaired referenced columns flagged")
+        try db.run("DROP TABLE orders, parts")
+
         // Views.
         try db.run(ViewDesign.sql(name: "cheap", columns: "", select: "SELECT id, title FROM goods WHERE price < 5;"))
         let view = DatabaseObject(name: "cheap", kind: .view)

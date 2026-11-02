@@ -1,9 +1,9 @@
 import AppKit
 
 /// A window for designing a new table, or the Edit tab's editor for changing one: its name, a row per column with type,
-/// length, key, NOT NULL, UNIQUE, AUTO_INCREMENT, default and comment (dragged by the handle at
-/// the left to reorder), and a row per index with its kind and columns. The SQL it will run shows below as it's edited, with any warning, such as a
-/// column's data being deleted.
+/// length, key, NOT NULL, UNIQUE, BINARY, UNSIGNED, ZEROFILL, AUTO_INCREMENT, generated, default and comment (dragged by
+/// the handle at the left to reorder), a row per index with its kind and columns, and a row per foreign key. Any warning,
+/// such as a column's data being deleted, shows below, and the SQL it will run behind a button there.
 final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSComboBoxDelegate, NSWindowDelegate {
     /// The window of a new table's editor; nil for one in the Edit tab.
     private let panel: NSPanel?
@@ -14,13 +14,24 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let snapshot: TableSnapshot?
     private var columns: [ColumnDraft]
     private var indexes: [IndexDraft]
+    private var foreignKeys: [ForeignKeyDraft]
+    /// The collation a column without one of its own has: the table's, or the database's for a new table.
+    private let tableCollation: String?
+    /// The tables a foreign key can refer to, and how to read one's columns (kept once read).
+    private let tables: [String]
+    private let columnsOf: ((String) -> [Column])?
+    private var columnCache: [String: [Column]] = [:]
     private let nameField = NSTextField()
     private let table = NSTableView()
     private let indexTable = NSTableView()
+    private let keyTable = NSTableView()
     private var removeIndexButton: NSButton!
+    private var removeKeyButton: NSButton!
     private let message = NSTextField(wrappingLabelWithString: "")
+    /// The SQL to run, shown in a popover from the button beside Save.
     private let preview = NSTextView.scrollableTextView()
     private var previewText: NSTextView { preview.documentView as! NSTextView }
+    private var sqlButton: NSButton!
     private var saveButton: NSButton!
     private var cancelButton: NSButton!
     /// In the Edit tab: whether the design differs from the table as it is.
@@ -41,7 +52,7 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     var tableName: String { nameField.stringValue.trimmingCharacters(in: .whitespaces) }
 
     private enum Field: String, CaseIterable {
-        case handle, name, type, length, primaryKey, notNull, unique, autoincrement, defaultValue, comment
+        case handle, name, type, length, primaryKey, notNull, unique, binary, unsigned, zerofill, autoincrement, generated, defaultValue, comment
         var title: String {
             switch self {
             case .handle: return ""
@@ -51,9 +62,27 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             case .primaryKey: return tr("主鍵", "Key")
             case .notNull: return tr("非空", "Not Null")
             case .unique: return tr("唯一", "Unique")
+            case .binary: return tr("二進位", "Binary")
+            case .unsigned: return tr("無符號", "Unsigned")
+            case .zerofill: return tr("補零", "Zero Fill")
             case .autoincrement: return tr("自動遞增", "Auto Inc.")
-            case .defaultValue: return tr("預設值", "Default")
+            case .generated: return tr("生成", "Generated")
+            case .defaultValue: return tr("預設值／運算式", "Default / Expression")
             case .comment: return tr("註解", "Comment")
+            }
+        }
+        var help: String? {
+            switch self {
+            case .binary: return tr("B（Binary）：以二進位排序和比較文字，會區分大小寫（_bin 定序）",
+                                    "B (Binary): sorts and compares the text as bytes, so case matters (a _bin collation)")
+            case .unsigned: return tr("UN（Unsigned）：無符號數值，只能是正數和 0", "UN (Unsigned): no sign, so only zero and up")
+            case .zerofill: return tr("ZF（Zero Fill）：位數不足時前面補 0，也會設為無符號",
+                                      "ZF (Zero Fill): pads with zeros in front to the width; makes it unsigned too")
+            case .autoincrement: return tr("AI（Auto Increment）：自動遞增流水號", "AI (Auto Increment): numbered for you")
+            case .generated: return tr("G（Generated Column）：生成欄位（計算欄位），值由右邊的運算式算出；VIRTUAL 讀取時才計算，STORED（MariaDB 稱 PERSISTENT）存起來",
+                                       "G (Generated Column): its value is worked out from the expression to the right; VIRTUAL when read, STORED (MariaDB’s PERSISTENT) kept with the row")
+            case .defaultValue: return tr("一般欄位的預設值；生成欄位的運算式", "An ordinary column’s default; a generated column’s expression")
+            default: return nil
             }
         }
         /// Every field but the handle and the name can be left out of the grid.
@@ -64,9 +93,10 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             case .name: return 120
             case .type: return 130
             case .length: return 80
-            case .primaryKey, .notNull, .unique: return 44
-            case .autoincrement: return 60
-            case .defaultValue: return 100
+            case .primaryKey, .notNull, .unique, .zerofill: return 44
+            case .binary, .unsigned, .autoincrement: return 56
+            case .generated: return 92
+            case .defaultValue: return 120
             case .comment: return 130
             }
         }
@@ -90,14 +120,42 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    /// For a new table, `snapshot` is nil. With `onSave`, the editor goes in the Edit tab rather
-    /// than a window of its own.
-    init(snapshot: TableSnapshot?, onSave: ((_ sql: String, _ name: String) -> Void)? = nil) {
+    private enum KeyField: String, CaseIterable {
+        case keyName, keyColumns, keyTable, keyReferenced, onDelete, onUpdate
+        var title: String {
+            switch self {
+            case .keyName: return tr("外鍵名稱", "Foreign Key")
+            case .keyColumns: return tr("欄位", "Columns")
+            case .keyTable: return tr("參照資料表", "References")
+            case .keyReferenced: return tr("參照欄位", "Referenced Columns")
+            case .onDelete: return "ON DELETE"
+            case .onUpdate: return "ON UPDATE"
+            }
+        }
+        var width: CGFloat {
+            switch self {
+            case .keyName: return 150
+            case .keyColumns, .keyReferenced: return 150
+            case .keyTable: return 140
+            case .onDelete, .onUpdate: return 110
+            }
+        }
+    }
+
+    /// For a new table, `snapshot` is nil and `collation` the database's. With `onSave`, the
+    /// editor goes in the Edit tab rather than a window of its own. `tables` and `columnsOf`
+    /// are for the foreign keys: the tables they can refer to and those tables' columns.
+    init(snapshot: TableSnapshot?, collation: String? = nil, tables: [String] = [], columnsOf: ((String) -> [Column])? = nil,
+         onSave: ((_ sql: String, _ name: String) -> Void)? = nil) {
         self.snapshot = snapshot
         self.onSave = onSave
+        self.tables = tables
+        self.columnsOf = columnsOf
+        tableCollation = snapshot?.collation ?? collation
         columns = snapshot?.columns ?? [ColumnDraft(name: "id", type: "INT UNSIGNED", primaryKey: true, notNull: true, autoincrement: true)]
         indexes = snapshot?.indexes ?? []
-        panel = onSave != nil ? nil : NSPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 740),
+        foreignKeys = snapshot?.foreignKeys ?? []
+        panel = onSave != nil ? nil : NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 780),
                                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         super.init()
         if let panel {
@@ -132,6 +190,7 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             column.width = field.width
             column.minWidth = field.width * 0.6
             column.resizingMask = .userResizingMask   // dragged wider or narrower at the header
+            column.headerToolTip = field.help
             if field == .handle {
                 column.minWidth = field.width
                 column.maxWidth = field.width
@@ -213,13 +272,46 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let indexButtons = NSStackView(views: [button("plus", "新增索引", "Add Index", #selector(addIndex(_:))), removeIndexButton, NSView()])
         indexButtons.spacing = 4
 
+        // The foreign keys.
+        for field in KeyField.allCases {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(field.rawValue))
+            column.title = field.title
+            column.width = field.width
+            column.minWidth = 90
+            keyTable.addTableColumn(column)
+        }
+        keyTable.dataSource = self
+        keyTable.delegate = self
+        keyTable.rowHeight = 30
+        keyTable.usesAlternatingRowBackgroundColors = true
+        keyTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        let keyScroll = NSScrollView()
+        keyScroll.documentView = keyTable
+        keyScroll.hasVerticalScroller = true
+        keyScroll.hasHorizontalScroller = true
+        keyScroll.autohidesScrollers = true
+        keyScroll.borderType = .bezelBorder
+        keyScroll.heightAnchor.constraint(equalToConstant: inTab ? 90 : 120).isActive = true
+        let keyTitle = NSTextField(labelWithString: tr("外鍵", "Foreign Keys"))
+        keyTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        let keyHint = NSTextField(labelWithString: tr("欄位的值要能在參照資料表的欄位中找到；參照欄位通常是那個資料表的主鍵。",
+                                                      "The columns’ values have to be found in the referenced columns, usually that table’s key."))
+        keyHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        keyHint.textColor = .secondaryLabelColor
+        keyHint.lineBreakMode = .byTruncatingTail
+        keyHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let keyHeader = NSStackView(views: [keyTitle, keyHint])
+        keyHeader.alignment = .firstBaseline
+        removeKeyButton = button("minus", "刪除外鍵", "Remove Foreign Key", #selector(removeForeignKey(_:)))
+        let keyButtons = NSStackView(views: [button("plus", "新增外鍵", "Add Foreign Key", #selector(addForeignKey(_:))), removeKeyButton, NSView()])
+        keyButtons.spacing = 4
+
         message.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         previewText.isEditable = false
         previewText.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         previewText.textContainerInset = NSSize(width: 6, height: 6)
-        preview.borderType = .bezelBorder
         preview.hasVerticalScroller = true
-        preview.heightAnchor.constraint(equalToConstant: inTab ? 90 : 150).isActive = true
+        preview.frame = NSRect(x: 0, y: 0, width: 620, height: 260)
 
         saveButton = NSButton(title: snapshot == nil ? tr("建立", "Create") : tr("儲存", "Save"), target: self, action: #selector(save(_:)))
         cancelButton = NSButton(title: inTab ? tr("還原", "Revert") : tr("取消", "Cancel"), target: self, action: #selector(cancel(_:)))
@@ -228,10 +320,14 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             saveButton.keyEquivalent = "\r"
             cancelButton.keyEquivalent = "\u{1b}"
         }
-        let actions = NSStackView(views: [NSView(), cancelButton, saveButton])
+        sqlButton = NSButton(title: tr("執行的 SQL", "SQL to Run"), target: self, action: #selector(showSQL(_:)))
+        sqlButton.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil)
+        sqlButton.imagePosition = .imageLeading
+        sqlButton.toolTip = tr("顯示儲存時將執行的 SQL", "Show the SQL that Save will run")
+        let actions = NSStackView(views: [sqlButton, NSView(), cancelButton, saveButton])
 
-        let stack = NSStackView(views: [nameRow, tableScroll, columnButtons, indexHeader, indexScroll, indexButtons, message,
-                                        NSTextField(labelWithString: tr("將執行的 SQL", "SQL to Run")), preview, actions])
+        let stack = NSStackView(views: [nameRow, tableScroll, columnButtons, indexHeader, indexScroll, indexButtons,
+                                        keyHeader, keyScroll, keyButtons, message, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -241,7 +337,8 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         stack.setCustomSpacing(14, after: columnButtons)
-        for view in [nameRow, tableScroll, columnButtons, indexHeader, indexScroll, indexButtons, message, preview, actions] {
+        stack.setCustomSpacing(14, after: indexButtons)
+        for view in [nameRow, tableScroll, columnButtons, indexHeader, indexScroll, indexButtons, keyHeader, keyScroll, keyButtons, message, actions] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset).isActive = true
         }
         tableScroll.setContentHuggingPriority(.init(1), for: .vertical)
@@ -256,10 +353,13 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     // MARK: The column table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { tableView === indexTable ? indexes.count : columns.count }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === indexTable ? indexes.count : tableView === keyTable ? foreignKeys.count : columns.count
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         if tableView === indexTable { return indexCell(tableColumn, row: row) }
+        if tableView === keyTable { return keyCell(tableColumn, row: row) }
         guard let field = tableColumn.flatMap({ Field(rawValue: $0.identifier.rawValue) }) else { return nil }
         let column = columns[row]
         switch field {
@@ -279,30 +379,52 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             text.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
             text.delegate = self
             return centered(text, fill: true)
-        case .primaryKey, .notNull, .unique, .autoincrement:
+        case .primaryKey, .notNull, .unique, .binary, .unsigned, .zerofill, .autoincrement:
             let box = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggled(_:)))
             box.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
-            let on = [Field.primaryKey: column.primaryKey, .notNull: column.notNull || column.primaryKey,
-                      .unique: column.unique, .autoincrement: column.autoincrement][field] ?? false
+            let kind = TableDesign.kind(of: column.type)
+            let on = [Field.primaryKey: column.primaryKey, .notNull: column.notNull || column.primaryKey, .unique: column.unique,
+                      .binary: TableDesign.textual.contains(kind) && TableDesign.isBinary(column, tableCollation: tableCollation),
+                      .unsigned: TableDesign.has("UNSIGNED", in: column.type), .zerofill: TableDesign.has("ZEROFILL", in: column.type),
+                      .autoincrement: column.autoincrement][field] ?? false
             box.state = on ? .on : .off
-            // A key can't be NULL, and a generated column's value isn't set by these.
-            box.isEnabled = !(field == .notNull && column.primaryKey) && (column.generated == nil || field == .primaryKey || field == .unique)
+            // A key can't be NULL, a generated column's value isn't set by these, only text is
+            // binary and only numbers unsigned.
+            switch field {
+            case .notNull: box.isEnabled = !column.primaryKey && column.expression == nil
+            case .autoincrement: box.isEnabled = column.expression == nil
+            case .binary: box.isEnabled = TableDesign.textual.contains(kind)
+            case .unsigned, .zerofill: box.isEnabled = TableDesign.numeric.contains(kind)
+            default: box.isEnabled = true
+            }
+            box.toolTip = field.help
             return centered(box)
+        case .generated:
+            let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+            popUp.controlSize = .small
+            popUp.addItems(withTitles: ["—", "VIRTUAL", "STORED"])
+            popUp.item(at: 2)?.toolTip = tr("MariaDB 稱為 PERSISTENT", "PERSISTENT in MariaDB")
+            popUp.selectItem(at: column.expression == nil ? 0 : column.stored ? 2 : 1)
+            popUp.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
+            popUp.toolTip = field.help
+            popUp.target = self
+            popUp.action = #selector(generationChanged(_:))
+            return centered(popUp, fill: true)
         case .type:
             let combo = NSComboBox()
             combo.addItems(withObjectValues: TableDesign.types)
-            combo.stringValue = TableDesign.split(column.type).base
+            combo.stringValue = TableDesign.bareType(TableDesign.split(column.type).base)
             combo.isBordered = false
             combo.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
             combo.delegate = self
             return centered(combo, fill: true)
         case .name, .defaultValue, .comment:
             let text = NSTextField(string: field == .name ? column.name : field == .comment ? column.comment
-                                   : column.generated.map { _ in tr("（產生的欄位）", "(generated)") } ?? column.defaultValue)
+                                   : column.expression ?? column.defaultValue)
             text.isBordered = false
             text.drawsBackground = false
-            text.isEditable = !(field == .defaultValue && column.generated != nil)
-            text.placeholderString = field == .defaultValue ? tr("（無）", "(none)") : nil
+            text.placeholderString = field != .defaultValue ? nil
+                : column.expression != nil ? tr("運算式，例如 price * qty", "expression, e.g. price * qty") : tr("（無）", "(none)")
             text.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
             text.delegate = self
             return centered(text, fill: true)
@@ -334,18 +456,51 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         case .notNull: columns[row].notNull = on
         case .unique: columns[row].unique = on
         case .autoincrement: columns[row].autoincrement = on
+        case .binary: columns[row].collation = TableDesign.collation(binary: on, for: columns[row], tableCollation: tableCollation)
+        case .unsigned: columns[row].type = TableDesign.setting("UNSIGNED", on, in: columns[row].type)
+        case .zerofill: columns[row].type = TableDesign.setting("ZEROFILL", on, in: columns[row].type)
         default: break
         }
         if field == .primaryKey {
             columns[row].notNull = columns[row].notNull || on
             table.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
         }
+        if field == .unsigned || field == .zerofill { reloadAttributes(of: row) }   // each may tick or clear the other
+        update()
+    }
+
+    /// No generation, VIRTUAL or STORED. A generated column has an expression where the default
+    /// was, and no AUTO_INCREMENT.
+    @objc private func generationChanged(_ sender: NSPopUpButton) {
+        let row = table.row(for: sender)
+        guard columns.indices.contains(row) else { return }
+        view.window?.makeFirstResponder(nil)   // the text typed so far counts
+        if sender.indexOfSelectedItem == 0 {
+            columns[row].expression = nil
+            columns[row].stored = false
+        } else {
+            columns[row].expression = columns[row].expression ?? ""
+            columns[row].stored = sender.indexOfSelectedItem == 2
+            columns[row].autoincrement = false
+        }
+        table.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
         update()
     }
 
     func controlTextDidChange(_ notification: Notification) {
         guard let field = notification.object as? NSTextField else { return }
         if field === nameField { return update() }
+        if let keyField = field.identifier.flatMap({ KeyField(rawValue: $0.rawValue) }) {
+            let row = keyTable.row(for: field)
+            guard foreignKeys.indices.contains(row) else { return }
+            switch keyField {
+            case .keyName: foreignKeys[row].name = field.stringValue.trimmingCharacters(in: .whitespaces)
+            case .keyColumns: foreignKeys[row].columns = IndexDraft.columns(from: field.stringValue).map(IndexDraft.column(of:))
+            case .keyReferenced: foreignKeys[row].referencedColumns = IndexDraft.columns(from: field.stringValue).map(IndexDraft.column(of:))
+            default: break
+            }
+            return update()
+        }
         if let indexField = field.identifier.flatMap({ IndexField(rawValue: $0.rawValue) }) {
             let row = indexTable.row(for: field)
             guard indexes.indices.contains(row) else { return }
@@ -360,10 +515,12 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             renameInIndexes(columns[row].name, to: field.stringValue)
             columns[row].name = field.stringValue
         case Field.type.rawValue:
-            columns[row].type = TableDesign.join(field.stringValue, TableDesign.split(columns[row].type).length)
-            reloadLength(of: row)
+            columns[row].type = TableDesign.retype(columns[row].type, to: field.stringValue, length: TableDesign.split(columns[row].type).length)
+            dropCollationUnlessText(row)
+            reloadAttributes(of: row)
         case Field.length.rawValue: columns[row].type = TableDesign.join(TableDesign.split(columns[row].type).base, field.stringValue)
-        case Field.defaultValue.rawValue: columns[row].defaultValue = field.stringValue
+        case Field.defaultValue.rawValue:
+            if columns[row].expression != nil { columns[row].expression = field.stringValue } else { columns[row].defaultValue = field.stringValue }
         case Field.comment.rawValue: columns[row].comment = field.stringValue
         default: break
         }
@@ -375,7 +532,7 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     func controlTextDidEndEditing(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, field.identifier?.rawValue == Field.defaultValue.rawValue else { return }
         let row = table.row(for: field)
-        guard columns.indices.contains(row), columns[row].generated == nil else { return }
+        guard columns.indices.contains(row), columns[row].expression == nil else { return }
         let value = field.stringValue.trimmingCharacters(in: .whitespaces)
         let quoted = value.isEmpty ? "" : TableDesign.defaultSQL(value)
         guard quoted != field.stringValue else { return }
@@ -423,15 +580,23 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let row = table.row(for: combo)
         guard columns.indices.contains(row) else { return }
         let old = TableDesign.split(columns[row].type), base = TableDesign.types[combo.indexOfSelectedItem]
-        columns[row].type = TableDesign.join(base, TableDesign.length(changingType: old.base, to: base, from: old.length))
-        reloadLength(of: row)
+        columns[row].type = TableDesign.retype(columns[row].type, to: base, length: TableDesign.length(changingType: old.base, to: base, from: old.length))
+        dropCollationUnlessText(row)
+        reloadAttributes(of: row)
         update()
     }
 
-    /// Shows the row's length again, after its type changed: a new one, or a field that's off.
-    private func reloadLength(of row: Int) {
-        guard let column = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == Field.length.rawValue }) else { return }
-        table.reloadData(forRowIndexes: [row], columnIndexes: [column])
+    /// Only text has a collation: a column changed to another type loses its own.
+    private func dropCollationUnlessText(_ row: Int) {
+        if !TableDesign.textual.contains(TableDesign.kind(of: columns[row].type)) { columns[row].collation = nil }
+    }
+
+    /// Shows the row's length and the boxes that go with its type again, after the type changed:
+    /// a new length, or fields that are off.
+    private func reloadAttributes(of row: Int) {
+        let fields: [Field] = [.length, .binary, .unsigned, .zerofill]
+        let shown = IndexSet(table.tableColumns.indices.filter { fields.map(\.rawValue).contains(table.tableColumns[$0].identifier.rawValue) })
+        table.reloadData(forRowIndexes: [row], columnIndexes: shown)
     }
 
     // MARK: Dragging into order
@@ -495,6 +660,9 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         for i in indexes.indices { indexes[i].columns.removeAll { IndexDraft.column(of: $0) == removed } }
         indexes.removeAll { $0.columns.isEmpty }
         indexTable.reloadData()
+        // A foreign key on it goes, since its columns and the referenced ones pair up.
+        foreignKeys.removeAll { $0.columns.contains(removed) }
+        keyTable.reloadData()
         table.reloadData()
         if !columns.isEmpty { table.selectRowIndexes([min(row, columns.count - 1)], byExtendingSelection: false) }
         update()
@@ -616,10 +784,167 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             }
         }
         if changed { indexTable.reloadData() }
+        changed = false
+        let ownName = snapshot?.name ?? tableName
+        for i in foreignKeys.indices {
+            for j in foreignKeys[i].columns.indices where foreignKeys[i].columns[j] == old {
+                foreignKeys[i].columns[j] = new
+                changed = true
+            }
+            guard foreignKeys[i].schema == nil, foreignKeys[i].table == ownName else { continue }
+            for j in foreignKeys[i].referencedColumns.indices where foreignKeys[i].referencedColumns[j] == old {
+                foreignKeys[i].referencedColumns[j] = new
+                changed = true
+            }
+        }
+        if changed { keyTable.reloadData() }
+    }
+
+    // MARK: Foreign keys
+
+    private func keyCell(_ tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let field = tableColumn.flatMap({ KeyField(rawValue: $0.identifier.rawValue) }) else { return nil }
+        let key = foreignKeys[row]
+        func popUp(_ titles: [String], selected: String, _ action: Selector) -> NSView {
+            let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+            popUp.controlSize = .small
+            popUp.addItems(withTitles: titles)
+            popUp.selectItem(withTitle: selected)
+            popUp.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
+            popUp.target = self
+            popUp.action = action
+            return centered(popUp, fill: true)
+        }
+        switch field {
+        case .onDelete: return popUp(ForeignKeyDraft.actions, selected: key.onDelete, #selector(keyActionChanged(_:)))
+        case .onUpdate: return popUp(ForeignKeyDraft.actions, selected: key.onUpdate, #selector(keyActionChanged(_:)))
+        case .keyTable:
+            var titles = referableTables
+            let current = keyTableTitle(key)
+            if !current.isEmpty, !titles.contains(current) { titles.append(current) }
+            if current.isEmpty { titles.insert("", at: 0) }
+            return popUp(titles, selected: current, #selector(keyTableChanged(_:)))
+        case .keyName, .keyColumns, .keyReferenced:
+            let text = NSTextField(string: field == .keyName ? key.name : field == .keyColumns ? key.columns.joined(separator: ", ")
+                                   : key.referencedColumns.joined(separator: ", "))
+            text.isBordered = false
+            text.drawsBackground = false
+            text.placeholderString = field == .keyName ? tr("（自動命名）", "(named for you)") : tr("例如 user_id", "e.g. user_id")
+            text.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
+            text.delegate = self
+            guard field != .keyName else { return centered(text, fill: true) }
+            let pick = NSButton(image: NSImage(systemSymbolName: "list.bullet", accessibilityDescription: tr("選擇欄位", "Choose Columns"))!,
+                                target: self, action: #selector(showKeyColumns(_:)))
+            pick.isBordered = false
+            pick.toolTip = tr("選擇欄位", "Choose Columns")
+            pick.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
+            pick.setContentHuggingPriority(.required, for: .horizontal)
+            text.setContentHuggingPriority(.init(1), for: .horizontal)
+            return centered(NSStackView(views: [text, pick]), fill: true)
+        }
+    }
+
+    /// The tables of the database, and this one (a key may refer to its own table).
+    private var referableTables: [String] {
+        let own = snapshot?.name ?? tableName
+        return own.isEmpty || tables.contains(own) ? tables : tables + [own]
+    }
+
+    private func keyTableTitle(_ key: ForeignKeyDraft) -> String {
+        key.schema.map { "\($0).\(key.table)" } ?? key.table
+    }
+
+    /// A table's columns: this table's as edited, another's as the server has them.
+    private func columns(ofReferenced key: ForeignKeyDraft) -> [Column] {
+        if key.schema == nil, key.table == (snapshot?.name ?? tableName) {
+            let keys = columns.filter(\.primaryKey).map(\.name)
+            return columns.map { Column(name: $0.name, type: $0.type, notNull: $0.notNull, defaultValue: nil,
+                                        primaryKey: (keys.firstIndex(of: $0.name) ?? -1) + 1) }
+        }
+        guard key.schema == nil, !key.table.isEmpty, let columnsOf else { return [] }
+        if let known = columnCache[key.table] { return known }
+        let read = columnsOf(key.table)
+        columnCache[key.table] = read
+        return read
+    }
+
+    @objc private func keyActionChanged(_ sender: NSPopUpButton) {
+        let row = keyTable.row(for: sender)
+        guard foreignKeys.indices.contains(row), let action = sender.titleOfSelectedItem else { return }
+        if sender.identifier?.rawValue == KeyField.onDelete.rawValue { foreignKeys[row].onDelete = action } else { foreignKeys[row].onUpdate = action }
+        update()
+    }
+
+    /// Choosing the table to refer to fills in its key as the referenced columns.
+    @objc private func keyTableChanged(_ sender: NSPopUpButton) {
+        let row = keyTable.row(for: sender)
+        guard foreignKeys.indices.contains(row), let title = sender.titleOfSelectedItem, title != keyTableTitle(foreignKeys[row]) else { return }
+        view.window?.makeFirstResponder(nil)
+        foreignKeys[row].table = title
+        foreignKeys[row].schema = nil
+        let key = columns(ofReferenced: foreignKeys[row]).filter { $0.primaryKey > 0 }.sorted { $0.primaryKey < $1.primaryKey }.map(\.name)
+        foreignKeys[row].referencedColumns = key
+        keyTable.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<keyTable.numberOfColumns))
+        update()
+    }
+
+    /// A menu of the columns to tick in or out: this table's, or the referenced table's.
+    @objc private func showKeyColumns(_ sender: NSButton) {
+        let row = keyTable.row(for: sender)
+        guard foreignKeys.indices.contains(row) else { return }
+        keyTable.selectRowIndexes([row], byExtendingSelection: false)
+        view.window?.makeFirstResponder(nil)   // the text typed so far counts
+        let referenced = sender.identifier?.rawValue == KeyField.keyReferenced.rawValue
+        let names = referenced ? columns(ofReferenced: foreignKeys[row]).map(\.name) : columns.map(\.name).filter { !$0.isEmpty }
+        let used = referenced ? foreignKeys[row].referencedColumns : foreignKeys[row].columns
+        let menu = NSMenu()
+        if names.isEmpty {
+            menu.addItem(withTitle: tr("請先選擇參照資料表", "Choose the table to refer to first"), action: nil, keyEquivalent: "").isEnabled = false
+        }
+        for name in names {
+            let item = menu.addItem(withTitle: name, action: #selector(toggleKeyColumn(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = used.contains(name) ? .on : .off
+            item.tag = row
+            item.representedObject = referenced
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+    }
+
+    @objc private func toggleKeyColumn(_ sender: NSMenuItem) {
+        let row = sender.tag
+        guard foreignKeys.indices.contains(row) else { return }
+        let referenced = sender.representedObject as? Bool == true
+        var list = referenced ? foreignKeys[row].referencedColumns : foreignKeys[row].columns
+        if sender.state == .on { list.removeAll { $0 == sender.title } } else { list.append(sender.title) }
+        if referenced { foreignKeys[row].referencedColumns = list } else { foreignKeys[row].columns = list }
+        keyTable.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<keyTable.numberOfColumns))
+        update()
+    }
+
+    @objc private func addForeignKey(_ sender: Any?) {
+        // Starting from the column selected above, if one is.
+        let start = columns.indices.contains(table.selectedRow) ? [columns[table.selectedRow].name] : []
+        foreignKeys.append(ForeignKeyDraft(columns: start))
+        keyTable.reloadData()
+        let row = foreignKeys.count - 1
+        keyTable.selectRowIndexes([row], byExtendingSelection: false)
+        keyTable.scrollRowToVisible(row)
+        update()
+    }
+
+    @objc private func removeForeignKey(_ sender: Any?) {
+        let row = keyTable.selectedRow
+        guard foreignKeys.indices.contains(row) else { return }
+        foreignKeys.remove(at: row)
+        keyTable.reloadData()
+        if !foreignKeys.isEmpty { keyTable.selectRowIndexes([min(row, foreignKeys.count - 1)], byExtendingSelection: false) }
+        update()
     }
 
     private func updateButtons() {
         removeIndexButton?.isEnabled = indexes.indices.contains(indexTable.selectedRow)
+        removeKeyButton?.isEnabled = foreignKeys.indices.contains(keyTable.selectedRow)
         let row = table.selectedRow
         removeButton.isEnabled = row >= 0
         upButton.isEnabled = row > 0
@@ -632,17 +957,17 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func update() {
         updateButtons()
         let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        if let problem = TableDesign.problem(name: name, columns: columns, indexes: indexes) {
+        if let problem = TableDesign.problem(name: name, columns: columns, indexes: indexes, foreignKeys: foreignKeys) {
             show(sql: "", message: problem, error: true)
             hasChanges = true
             if panel == nil { cancelButton.isEnabled = true }
             return
         }
         guard let snapshot else {
-            show(sql: TableDesign.createSQL(name: name, columns: columns, indexes: indexes), message: "", error: false)
+            show(sql: TableDesign.createSQL(name: name, columns: columns, indexes: indexes, foreignKeys: foreignKeys), message: "", error: false)
             return
         }
-        let change = TableDesign.alterSQL(snapshot, newName: name, columns: columns, indexes: indexes)
+        let change = TableDesign.alterSQL(snapshot, newName: name, columns: columns, indexes: indexes, foreignKeys: foreignKeys)
         let unchanged = change.sql.isEmpty
         show(sql: unchanged ? "" : change.sql,
              message: unchanged ? tr("沒有變更。", "Nothing has changed.") : change.warnings.joined(separator: "\n"),
@@ -660,7 +985,22 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         message.textColor = error ? .systemRed : .systemOrange
         message.isHidden = text.isEmpty
         saveButton.isEnabled = canSave ?? !error
+        sqlButton.isEnabled = !sql.isEmpty
         self.sql = sql.isEmpty ? nil : sql
+    }
+
+    /// The SQL Save will run, in a popover over the button, to read or copy.
+    @objc private func showSQL(_ sender: NSButton) {
+        view.window?.makeFirstResponder(nil)   // finish the cell being typed in
+        update()
+        guard sql != nil else { return NSSound.beep() }
+        let controller = NSViewController()
+        controller.view = preview
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        popover.contentSize = preview.frame.size
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
     }
 
     @objc private func save(_ sender: Any?) {
@@ -692,8 +1032,10 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         nameField.stringValue = snapshot.name
         columns = snapshot.columns
         indexes = snapshot.indexes
+        foreignKeys = snapshot.foreignKeys
         table.reloadData()
         indexTable.reloadData()
+        keyTable.reloadData()
         update()
     }
 }

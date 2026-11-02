@@ -97,8 +97,12 @@ struct Column {
     var autoIncrement = false
     /// What else EXTRA says that a definition has to keep: ON UPDATE CURRENT_TIMESTAMP.
     var onUpdate: String?
-    /// A generated column's GENERATED ALWAYS AS (…) VIRTUAL or STORED.
-    var generated: String?
+    /// A generated column's expression, and whether its values are stored (STORED, MariaDB's
+    /// PERSISTENT) or worked out when read (VIRTUAL); nil for an ordinary column.
+    var generationExpression: String?
+    var stored = false
+    /// The generated column's clause as SQL: GENERATED ALWAYS AS (…) VIRTUAL or STORED.
+    var generated: String? { generationExpression.map { "GENERATED ALWAYS AS (\($0)) " + (stored ? "STORED" : "VIRTUAL") } }
     var collation: String?
     var comment = ""
 }
@@ -465,7 +469,8 @@ final class MySQLDatabase {
             }
             let expression = row[7] == .null ? "" : row[7].display
             if !expression.isEmpty {
-                column.generated = "GENERATED ALWAYS AS (\(expression)) " + (extra.contains("stored") || extra.contains("persistent") ? "STORED" : "VIRTUAL")
+                column.generationExpression = expression
+                column.stored = extra.contains("stored") || extra.contains("persistent")
             }
             if row[5] != .null, row[5] != tableCollation { column.collation = row[5].display }
             column.comment = row[6].display
