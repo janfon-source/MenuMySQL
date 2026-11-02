@@ -2,7 +2,7 @@ import AppKit
 
 /// A window for designing a new table, or the Edit tab's editor for changing one: its name, a row per column with type,
 /// length, key, NOT NULL, UNIQUE, BINARY, UNSIGNED, ZEROFILL, AUTO_INCREMENT, generated, default and comment (dragged by
-/// the handle at the left to reorder), a row per index with its kind and columns, and a row per foreign key. Any warning,
+/// the handle at the left to reorder), a row per index with its kind and columns, and (changing a table) a row per foreign key. Any warning,
 /// such as a column's data being deleted, shows below, and the SQL it will run behind a button there.
 final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSComboBoxDelegate, NSWindowDelegate {
     /// The window of a new table's editor; nil for one in the Edit tab.
@@ -358,8 +358,10 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         actionsSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let actions = NSStackView(views: [message, actionsSpacer, sqlButton, cancelButton, saveButton])
 
-        let stack = NSStackView(views: [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll,
-                                        keyHeader, keyScroll, actions])
+        // A new table's window leaves out foreign keys: they're added once the table is there, in the Edit tab.
+        let keySection: [NSView] = snapshot == nil ? [] : [keyHeader, keyScroll]
+        let sections = [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll] + keySection + [actions]
+        let stack = NSStackView(views: sections)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -370,7 +372,7 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         view.addSubview(stack)
         stack.setCustomSpacing(14, after: inTab ? tableScroll : columnButtons)
         stack.setCustomSpacing(14, after: indexScroll)
-        for view in [nameRow, tableScroll] + (inTab ? [] : [columnButtons]) + [indexHeader, indexScroll, keyHeader, keyScroll, actions] {
+        for view in sections {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset).isActive = true
         }
         tableScroll.setContentHuggingPriority(.init(1), for: .vertical)
