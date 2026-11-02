@@ -58,6 +58,25 @@ struct IndexDraft: Equatable {
         return name + text.dropFirst(head.count)
     }
 
+    /// A part taken apart for the editor's fields: `title(20) DESC` is ("title", "20", true).
+    static func pieces(of part: String) -> (column: String, length: String, descending: Bool) {
+        let text = part.trimmingCharacters(in: .whitespaces)
+        let head = text.prefix { $0 != "(" && $0 != " " }
+        var rest = text.dropFirst(head.count).trimmingCharacters(in: .whitespaces)
+        var length = ""
+        if rest.hasPrefix("("), let close = rest.firstIndex(of: ")") {
+            length = String(rest[rest.index(after: rest.startIndex)..<close])
+            rest = rest[rest.index(after: close)...].trimmingCharacters(in: .whitespaces)
+        }
+        return (column(of: text), length, rest.uppercased() == "DESC")
+    }
+
+    /// A part put together from the editor's fields.
+    static func part(column: String, length: String, descending: Bool) -> String {
+        let length = length.trimmingCharacters(in: .whitespaces)
+        return column + (length.isEmpty ? "" : "(\(length))") + (descending ? " DESC" : "")
+    }
+
     /// The columns as text, for the editor's field: name, title(20)
     var columnsText: String { columns.joined(separator: ", ") }
 

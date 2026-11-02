@@ -109,14 +109,14 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             switch self {
             case .indexName: return tr("索引名稱", "Index Name")
             case .kind: return tr("類型", "Kind")
-            case .indexColumns: return tr("欄位（可加長度或 DESC，例如 title(20), created DESC）", "Columns (with a length or DESC, e.g. title(20), created DESC)")
+            case .indexColumns: return tr("欄位（每個欄位可設前置長度和排序）", "Columns (each with a prefix length and an order, if wanted)")
             }
         }
         var width: CGFloat {
             switch self {
             case .indexName: return 170
             case .kind: return 110
-            case .indexColumns: return 460
+            case .indexColumns: return 520
             }
         }
     }
@@ -269,6 +269,8 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let indexScroll = NSScrollView()
         indexScroll.documentView = indexTable
         indexScroll.hasVerticalScroller = true
+        indexScroll.hasHorizontalScroller = true   // an index over many columns is wider than the grid
+        indexScroll.autohidesScrollers = true
         indexScroll.borderType = .bezelBorder
         // Smaller in the Edit tab, which has less room than a window and scrolls when short of it.
         let inTab = panel == nil
@@ -525,11 +527,17 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             }
             return update()
         }
-        if let indexField = field.identifier.flatMap({ IndexField(rawValue: $0.rawValue) }) {
+        if field.identifier == Self.partLength {
+            let row = indexTable.row(for: field), i = field.tag
+            guard indexes.indices.contains(row), indexes[row].columns.indices.contains(i) else { return }
+            let piece = IndexDraft.pieces(of: indexes[row].columns[i])
+            indexes[row].columns[i] = IndexDraft.part(column: piece.column, length: field.stringValue, descending: piece.descending)
+            return update()
+        }
+        if field.identifier?.rawValue == IndexField.indexName.rawValue {
             let row = indexTable.row(for: field)
             guard indexes.indices.contains(row) else { return }
-            if indexField == .indexName { indexes[row].name = field.stringValue.trimmingCharacters(in: .whitespaces) }
-            else { indexes[row].columns = IndexDraft.columns(from: field.stringValue) }
+            indexes[row].name = field.stringValue.trimmingCharacters(in: .whitespaces)
             return update()
         }
         let row = table.row(for: field)
@@ -554,6 +562,8 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     /// A default typed as plain text gets its quotes once the field is left, as the SQL will
     /// have it; numbers, NULL, CURRENT_TIMESTAMP, expressions and quoted text stay as typed.
     func controlTextDidEndEditing(_ notification: Notification) {
+        // A column named or renamed shows in the indexes' column menus.
+        if let field = notification.object as? NSTextField, field.identifier?.rawValue == Field.name.rawValue { indexTable.reloadData() }
         guard let field = notification.object as? NSTextField, field.identifier?.rawValue == Field.defaultValue.rawValue else { return }
         let row = table.row(for: field)
         guard columns.indices.contains(row), columns[row].expression == nil else { return }
@@ -718,58 +728,113 @@ final class TableEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             popUp.target = self
             popUp.action = #selector(kindChanged(_:))
             return centered(popUp, fill: true)
-        case .indexName, .indexColumns:
-            let text = NSTextField(string: field == .indexName ? index.name : index.columnsText)
+        case .indexName:
+            let text = NSTextField(string: index.name)
             text.isBordered = false
             text.drawsBackground = false
-            text.placeholderString = field == .indexName ? tr("（自動命名）", "(named for you)") : tr("例如 name, created DESC", "e.g. name, created DESC")
+            text.placeholderString = tr("（自動命名）", "(named for you)")
             text.identifier = NSUserInterfaceItemIdentifier(field.rawValue)
             text.delegate = self
-            guard field == .indexColumns else { return centered(text, fill: true) }
-            // Beside the columns, a menu of the table's columns to tick in or out.
-            let pick = NSButton(image: NSImage(systemSymbolName: "list.bullet", accessibilityDescription: tr("選擇欄位", "Choose Columns"))!,
-                                target: self, action: #selector(showIndexColumns(_:)))
-            pick.isBordered = false
-            pick.toolTip = tr("選擇欄位", "Choose Columns")
-            pick.setContentHuggingPriority(.required, for: .horizontal)
-            text.setContentHuggingPriority(.init(1), for: .horizontal)
-            return centered(NSStackView(views: [text, pick]), fill: true)
+            return centered(text, fill: true)
+        case .indexColumns:
+            // A part per column: the column chosen from a menu, then its prefix length and its
+            // order in fields of their own; ＋ adds another column at the end.
+            let parts = NSStackView()
+            parts.spacing = 10
+            for (i, part) in index.columns.enumerated() {
+                let piece = IndexDraft.pieces(of: part)
+                let column = NSPopUpButton(frame: .zero, pullsDown: false)
+                column.controlSize = .small
+                column.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                var names = columns.map(\.name).filter { !$0.isEmpty }
+                if !names.contains(piece.column) { names.append(piece.column) }
+                column.addItems(withTitles: names)
+                column.selectItem(withTitle: piece.column)
+                column.menu?.addItem(.separator())
+                let remove = column.menu?.addItem(withTitle: tr("從索引移除", "Remove from the Index"), action: nil, keyEquivalent: "")
+                remove?.tag = -1
+                column.tag = i
+                column.target = self
+                column.action = #selector(indexPartColumnChanged(_:))
+                let length = NSTextField(string: piece.length)
+                length.controlSize = .small
+                length.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                length.placeholderString = tr("長度", "length")
+                length.toolTip = tr("前置長度：只用文字的前幾個字元建立索引（選填）", "Prefix length: index only the first characters of the text (optional)")
+                length.widthAnchor.constraint(equalToConstant: 46).isActive = true
+                length.identifier = Self.partLength
+                length.tag = i
+                length.delegate = self
+                let order = NSPopUpButton(frame: .zero, pullsDown: false)
+                order.controlSize = .small
+                order.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                order.addItems(withTitles: ["ASC", "DESC"])
+                order.selectItem(at: piece.descending ? 1 : 0)
+                order.tag = i
+                order.target = self
+                order.action = #selector(indexPartOrderChanged(_:))
+                let group = NSStackView(views: [column, length, order])
+                group.spacing = 3
+                parts.addArrangedSubview(group)
+            }
+            let add = NSButton(image: NSImage(systemSymbolName: "plus.circle", accessibilityDescription: tr("加入欄位", "Add a Column"))!,
+                               target: self, action: #selector(addIndexPart(_:)))
+            add.isBordered = false
+            add.contentTintColor = .secondaryLabelColor
+            add.toolTip = tr("加入一個欄位到索引", "Add a column to the index")
+            parts.addArrangedSubview(add)
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+            parts.addArrangedSubview(spacer)
+            return centered(parts, fill: true)
         }
+    }
+
+    private static let partLength = NSUserInterfaceItemIdentifier("indexPartLength")
+
+    /// Another column for the part, or none (the last menu item takes the part out).
+    @objc private func indexPartColumnChanged(_ sender: NSPopUpButton) {
+        let row = indexTable.row(for: sender), i = sender.tag
+        guard indexes.indices.contains(row), indexes[row].columns.indices.contains(i), let title = sender.titleOfSelectedItem else { return }
+        view.window?.makeFirstResponder(nil)   // the length typed so far counts
+        if sender.selectedItem?.tag == -1 {
+            indexes[row].columns.remove(at: i)
+            reloadIndexRow(row)
+        } else {
+            let piece = IndexDraft.pieces(of: indexes[row].columns[i])
+            indexes[row].columns[i] = IndexDraft.part(column: title, length: piece.length, descending: piece.descending)
+        }
+        update()
+    }
+
+    @objc private func indexPartOrderChanged(_ sender: NSPopUpButton) {
+        let row = indexTable.row(for: sender), i = sender.tag
+        guard indexes.indices.contains(row), indexes[row].columns.indices.contains(i) else { return }
+        let piece = IndexDraft.pieces(of: indexes[row].columns[i])
+        indexes[row].columns[i] = IndexDraft.part(column: piece.column, length: piece.length, descending: sender.indexOfSelectedItem == 1)
+        update()
+    }
+
+    /// Adds the first column the index doesn't have yet.
+    @objc private func addIndexPart(_ sender: NSButton) {
+        let row = indexTable.row(for: sender)
+        guard indexes.indices.contains(row) else { return }
+        view.window?.makeFirstResponder(nil)
+        let used = Set(indexes[row].columns.map(IndexDraft.column(of:)))
+        guard let name = columns.map(\.name).first(where: { !$0.isEmpty && !used.contains($0) }) ?? columns.first?.name else { return NSSound.beep() }
+        indexes[row].columns.append(name)
+        reloadIndexRow(row)
+        update()
+    }
+
+    private func reloadIndexRow(_ row: Int) {
+        indexTable.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<indexTable.numberOfColumns))
     }
 
     @objc private func kindChanged(_ sender: NSPopUpButton) {
         let row = indexTable.row(for: sender)
         guard indexes.indices.contains(row), let kind = sender.titleOfSelectedItem.flatMap(IndexDraft.Kind.init(rawValue:)) else { return }
         indexes[row].kind = kind
-        update()
-    }
-
-    @objc private func showIndexColumns(_ sender: NSButton) {
-        let row = indexTable.row(for: sender)
-        guard indexes.indices.contains(row) else { return }
-        indexTable.selectRowIndexes([row], byExtendingSelection: false)
-        view.window?.makeFirstResponder(nil)   // the text typed so far counts
-        let menu = NSMenu()
-        let used = indexes[row].columns.map(IndexDraft.column(of:))
-        for column in columns where !column.name.isEmpty {
-            let item = menu.addItem(withTitle: column.name, action: #selector(toggleIndexColumn(_:)), keyEquivalent: "")
-            item.target = self
-            item.state = used.contains(column.name) ? .on : .off
-            item.tag = row
-        }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
-    }
-
-    /// Adds the column at the end of the index, or takes it out.
-    @objc private func toggleIndexColumn(_ sender: NSMenuItem) {
-        let row = sender.tag
-        guard indexes.indices.contains(row) else { return }
-        if sender.state == .on {
-            indexes[row].columns.removeAll { IndexDraft.column(of: $0) == sender.title }
-        } else {
-            indexes[row].columns.append(sender.title)
-        }
-        indexTable.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<indexTable.numberOfColumns))
         update()
     }
 
