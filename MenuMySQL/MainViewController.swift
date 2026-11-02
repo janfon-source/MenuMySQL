@@ -64,8 +64,10 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let filterBar = FilterBar()
     private var dataPane: NSStackView!
     private var filterButton: NSButton!
-    /// Before the Edit, Data and SQL tabs: hides the tables and views on the left, or shows them again.
+    /// In the toolbar: hides the tables and views on the left, or shows them again.
     private var sidebarButton: NSButton!
+    /// After the tabs, while the Edit tab shows a table's editor: its column buttons.
+    private let designTools = NSStackView()
     private var sidebarWidth: CGFloat = 190
     private var columnsButton: NSButton!
     /// The Edit tab's menu of things to do to the table: optimize, export, print, AUTO_INCREMENT, empty.
@@ -142,6 +144,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             toolButton("doc.richtext", "結構文件：所有資料表和視圖的結構（Markdown，⇧⌘D）",
                        "Structure Document: every table and view, as Markdown (⇧⌘D)", #selector(showSchemaDocument(_:))),
         ]
+        sidebarButton = toolButton("sidebar.left", "隱藏或顯示資料表和視圖清單（⌃⌘S）", "Hide or Show the Tables and Views (⌃⌘S)",
+                                   #selector(toggleSidebar(_:)))
         newDatabaseButton = toolButton("plus.rectangle.on.folder", "新增資料庫（⌘N）", "New Database (⌘N)", #selector(newDatabase(_:)))
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
@@ -156,6 +160,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             databaseButtons[1],
             databaseButtons[2],
             databaseButtons[3],
+            sidebarButton,
             spacer,
             pinButton,
             toolButton("ellipsis.circle", "更多", "More", #selector(showMoreMenu(_:))),
@@ -413,9 +418,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         columnsButton = toolButton("checklist", "選擇要顯示的欄位（⌥⌘K）", "Choose the Columns to Show (⌥⌘K)", #selector(showColumnsMenu(_:)))
         tableMenuButton = toolButton("gearshape", "資料表功能：最佳化、分析、匯出、列印、自動遞增值、清空",
                                      "Table Actions: optimize, analyze, export, print, AUTO_INCREMENT, empty", #selector(showTableMenu(_:)))
-        sidebarButton = toolButton("sidebar.left", "隱藏或顯示資料表和視圖清單（⌃⌘S）", "Hide or Show the Tables and Views (⌃⌘S)",
-                                   #selector(toggleSidebar(_:)))
-        let tabBar = NSStackView(views: [sidebarButton, tabs, tabSpacer, columnsButton, filterButton, tableMenuButton])
+        designTools.spacing = 4
+        let tabBar = NSStackView(views: [tabs, designTools, tabSpacer, columnsButton, filterButton, tableMenuButton])
+        tabBar.setCustomSpacing(12, after: tabs)
         tabBar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         tabBar.setHuggingPriority(.required, for: .vertical)   // its own height; the content takes the rest
         let detail = NSStackView(views: [tabBar, content])
@@ -1531,6 +1536,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         designStale = false
         designDiscarded = false
         designHolder.subviews.forEach { $0.removeFromSuperview() }
+        designTools.arrangedSubviews.forEach { $0.removeFromSuperview() }
         designEditor = nil
         guard let database, let object = selected else { return }
         let content: NSView
@@ -1551,6 +1557,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                                          columnsOf: referencedColumns, onSave: onSave)
                 designEditor = editor
                 content = editor.view
+                if let tools = editor.tools { designTools.addArrangedSubview(tools) }
             }
         } catch {
             designMessage.stringValue = error.localizedDescription
@@ -1975,6 +1982,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         filterButton.isHidden = dataPane.isHidden
         columnsButton.isHidden = dataPane.isHidden
         tableMenuButton.isHidden = designView.isHidden
+        designTools.isHidden = designView.isHidden
         querySplit.isHidden = tab != .query || database == nil
         emptyLabel.isHidden = !(designView.isHidden && dataPane.isHidden && querySplit.isHidden)
         emptyLabel.stringValue = database == nil

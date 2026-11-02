@@ -132,9 +132,9 @@ struct TableSnapshot {
 /// the key and unique indexes, and the name, all in one statement that applies whole or not at all.
 enum TableDesign {
     /// The types the editor offers, without their lengths, which go in a field of their own.
-    static let types = ["INT", "BIGINT", "TINYINT", "SMALLINT", "MEDIUMINT", "DECIMAL", "DOUBLE", "FLOAT",
-                        "VARCHAR", "CHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "DATE", "DATETIME", "TIMESTAMP", "TIME", "YEAR",
-                        "BOOLEAN", "JSON", "BLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY", "ENUM", "SET", "BIT"]
+    static let types = ["BIGINT", "BINARY", "BIT", "BLOB", "BOOLEAN", "CHAR", "DATE", "DATETIME", "DECIMAL", "DOUBLE", "ENUM", "FLOAT",
+                        "INT", "JSON", "LONGBLOB", "LONGTEXT", "MEDIUMBLOB", "MEDIUMINT", "MEDIUMTEXT", "SET", "SMALLINT", "TEXT", "TIME",
+                        "TIMESTAMP", "TINYINT", "TINYTEXT", "VARBINARY", "VARCHAR", "YEAR"]
 
     /// Number types, which may be UNSIGNED and ZEROFILL.
     static let numeric: Set<String> = ["INT", "INTEGER", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT", "DECIMAL", "NUMERIC", "DEC",
