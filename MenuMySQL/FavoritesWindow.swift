@@ -240,6 +240,8 @@ final class FavoritesWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, 
         alert.addButton(withTitle: tr("儲存", "Save"))
         alert.addButton(withTitle: tr("取消", "Cancel"))
         alert.window.initialFirstResponder = form.firstField
+        // Through SSH adds the SSH server's rows; the dialog grows and shrinks to fit them.
+        form.onResize = { [weak alert] in alert?.layout() }
         while alert.runModal() == .alertFirstButtonReturn {
             switch form.location {
             case .success(let location):
