@@ -281,6 +281,20 @@ for port in ports.isEmpty ? [23306, 13306] : ports {
               "unpaired referenced columns flagged")
         try db.run("DROP TABLE orders, parts")
 
+        // A new row when columns can't be NULL and have no default: stand-ins by type, and the
+        // next number for a key without AUTO_INCREMENT.
+        try db.run("""
+            CREATE TABLE strict_t (n INT NOT NULL PRIMARY KEY, s VARCHAR(10) NOT NULL, e ENUM('it''s','b') NOT NULL,
+                                   d DATE NOT NULL, t DATETIME NOT NULL, y YEAR NOT NULL, j JSON NOT NULL, x DECIMAL(5,2) NOT NULL,
+                                   b BLOB NOT NULL, opt INT NULL)
+            """)
+        expect(try db.insertRow(into: "strict_t"), 1, "first key")
+        expect(try db.insertRow(into: "strict_t"), 2, "next key")
+        let strict = try db.run("SELECT n, s, e, d = CURDATE(), x, opt FROM strict_t ORDER BY n").rows
+        expect(strict.count, 2, "two strict rows")
+        expect(strict.last?.map(\.display), ["2", "", "it's", "1", "0.00", "NULL"], "stand-in values")
+        try db.run("DROP TABLE strict_t")
+
         // Views.
         try db.run(ViewDesign.sql(name: "cheap", columns: "", select: "SELECT id, title FROM goods WHERE price < 5;"))
         let view = DatabaseObject(name: "cheap", kind: .view)

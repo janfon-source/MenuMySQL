@@ -385,8 +385,81 @@ final class MySQLDatabase {
     }
 
     /// Adds a row of default values; returns the AUTO_INCREMENT value it was given, or 0.
+    /// Adds a row of defaults. A column that can't be NULL and has no default gets a stand-in
+    /// for its type (0, '', today, the first ENUM member), to be changed in the grid; a whole-number
+    /// key without AUTO_INCREMENT gets one more than the largest so far. Returns the new row's
+    /// key when it's a single whole number, else 0.
     func insertRow(into table: String) throws -> Int64 {
-        Int64(clamping: try runReturningID("INSERT INTO \(Database.quote(table)) () VALUES ()", []).lastInsertID)
+        let quoted = Database.quote(table)
+        let needed = try columns(of: table).filter {
+            $0.notNull && $0.defaultValue == nil && !$0.autoIncrement && $0.generationExpression == nil
+        }
+        // MariaDB keeps JSON as LONGTEXT with a json_valid() check, so '' wouldn't do.
+        var json: Set<String> = []
+        if isMariaDB, !needed.isEmpty {
+            let checks = try run("""
+                SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS
+                WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = ?
+                """, [.text(table)]).rows.map { $0[0].display.lowercased() }
+            json = Set(needed.map(\.name).filter { name in
+                checks.contains { $0.contains("json_valid(\(Database.quote(name).lowercased()))") }
+            })
+        }
+        var names: [String] = [], values: [String] = []
+        var key: Int64 = 0
+        for column in needed {
+            var value = json.contains(column.name) ? "'{}'" : Self.standIn(for: column.type)
+            if column.primaryKey > 0, value == "0" {
+                let largest = try run("SELECT MAX(\(Database.quote(column.name))) FROM \(quoted)").rows.first?.first
+                let next = (Int64(largest?.display ?? "") ?? 0) + 1
+                value = String(next)
+                key = next
+            }
+            guard let value else { continue }
+            names.append(Database.quote(column.name))
+            values.append(value)
+        }
+        let id = Int64(clamping: try runReturningID("INSERT INTO \(quoted) (\(names.joined(separator: ", "))) VALUES (\(values.joined(separator: ", ")))",
+                                                    []).lastInsertID)
+        return id != 0 ? id : key
+    }
+
+    /// A value any column of this type (as COLUMN_TYPE writes it) takes, as SQL; nil for spatial
+    /// types other than a point, which have no obvious one.
+    static func standIn(for columnType: String) -> String? {
+        let type = columnType.lowercased()
+        let base = String(type.prefix { $0.isLetter })
+        switch base {
+        case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric", "dec", "fixed",
+             "float", "double", "real", "bit", "bool", "boolean":
+            return "0"
+        case "year": return "YEAR(CURDATE())"
+        case "date": return "CURDATE()"
+        case "datetime", "timestamp": return "NOW()"
+        case "time": return "'00:00:00'"
+        case "json": return "'{}'"
+        case "point": return "POINT(0, 0)"
+        case "enum":
+            // enum('a','b'): the first member, quotes and all.
+            guard let start = type.firstIndex(of: "(") else { return "''" }
+            let members = columnType[columnType.index(after: start)...]
+            guard members.first == "'" else { return "''" }
+            var literal = "'", rest = members.dropFirst()
+            while let c = rest.first {
+                rest = rest.dropFirst()
+                if c == "'" {
+                    if rest.first == "'" { literal += "''"; rest = rest.dropFirst(); continue }
+                    break
+                }
+                literal.append(c)
+                if c == "\\", let next = rest.first { literal.append(next); rest = rest.dropFirst() }
+            }
+            return literal + "'"
+        case "geometry", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection", "geomcollection":
+            return nil
+        default:
+            return "''"   // char, varchar, text, blob, binary, set, and anything else that takes text
+        }
     }
 
     /// The databases on the server this account can see, by name.
